@@ -1,0 +1,4 @@
+# Reflow prose to printWidth instead of preserving hand-placed line breaks, so
+# editing a sentence doesn't leave the rest of the paragraph ragged.
+proseWrap: always
+printWidth: 90
