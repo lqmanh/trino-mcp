@@ -1,4 +1,5 @@
-from typing import Any
+import re
+from pathlib import Path
 
 import pytest
 from mcp import Client
@@ -57,24 +58,49 @@ async def test_writes_are_gated_on_allow_writes(
         assert "TRINO_ALLOW_WRITES" in texts(outcome)[0]
 
 
-async def test_output_file_cannot_escape_the_output_directory(
-    config: Config, tmp_path: Any
+@pytest.mark.parametrize("fmt", ["csv", "json"])
+async def test_the_server_names_the_export_file(
+    config: Config, tmp_path: Path, fmt: str
 ) -> None:
-    """The path comes from the model, and query results are untrusted input."""
-    jailed = config.model_copy(update={"output_dir": tmp_path})
-    async with serving(jailed, execute_to_file=7) as client:
-        escape = await client.call_tool(
-            "execute_query", {"sql": "SELECT 1", "output_file": "../../escaped.csv"}
-        )
-        allowed = await client.call_tool(
-            "execute_query", {"sql": "SELECT 1", "output_file": "nested/fine.csv"}
+    """The model supplies a format and nothing else.
+
+    Asserting the shape rather than a fixed name keeps real randomness and a
+    real clock in play; pinning either would need injection this suite has no
+    other reason to carry.
+    """
+    exporting = config.model_copy(update={"output_dir": tmp_path})
+    async with serving(exporting, execute_to_file=7) as client:
+        outcome = await client.call_tool(
+            "execute_query", {"sql": "SELECT 1", "output_file_format": fmt}
         )
 
-    assert escape.is_error
-    assert "TRINO_OUTPUT_DIR" in texts(escape)[0]
+    assert not outcome.is_error
+    body = payload(outcome)
+    assert body["rows_written"] == 7
 
-    assert not allowed.is_error
-    assert payload(allowed)["rows_written"] == 7
+    written = Path(body["path"])
+    assert written.exists()
+    assert written.parent == tmp_path.resolve()
+    # coolname's three-slot pattern can include a joining token, so the word
+    # count is not fixed: "rainbow-turtle-of-holiness".
+    assert re.fullmatch(rf"\d{{8}}T\d{{6}}(-[a-z]+)+\.{fmt}", written.name)
+
+
+async def test_the_output_directory_is_created_on_demand(
+    config: Config, tmp_path: Path
+) -> None:
+    """Building a server must not touch the filesystem, so creation waits."""
+    target = tmp_path / "does" / "not" / "exist"
+    exporting = config.model_copy(update={"output_dir": target})
+
+    async with serving(exporting, execute_to_file=1) as client:
+        assert not target.exists()
+        outcome = await client.call_tool(
+            "execute_query", {"sql": "SELECT 1", "output_file_format": "csv"}
+        )
+
+    assert not outcome.is_error
+    assert target.is_dir()
 
 
 async def test_describe_table_maps_columns(config: Config) -> None:

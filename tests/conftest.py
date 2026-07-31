@@ -6,6 +6,7 @@ Nothing here talks to a Trino cluster; the suite runs offline.
 import contextlib
 import json
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -13,6 +14,7 @@ from mcp import Client
 from mcp.types import CallToolResult
 
 from trino_mcp import Config, TrinoClient, create_server
+from trino_mcp.client import OutputFormat
 
 
 @pytest.fixture
@@ -104,8 +106,9 @@ class FakeTrino(TrinoClient):
             raise self.results["execute"]
         return self.results["execute"]
 
-    def execute_to_file(self, query: str, path: Any) -> int:
+    def execute_to_file(self, query: str, path: Path, fmt: OutputFormat) -> int:
         self.queries.append(query)
+        path.write_text("")
         return self.results.get("execute_to_file", 0)
 
     def list_catalogs(self) -> list[str]:

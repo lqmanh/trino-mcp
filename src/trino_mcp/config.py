@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 # Trino's defaults differ by scheme, so an unset TRINO_PORT resolves against
 # TRINO_HTTP_SCHEME rather than a single constant.
@@ -30,7 +30,16 @@ class Config(BaseModel):
     max_rows: int = Field(default=1000, ge=0)
     query_timeout_minutes: float = Field(default=5.0, ge=0)
     allow_writes: bool = False
-    output_dir: Path = Field(default_factory=Path.cwd)
+    output_dir: Path = Field(default=Path(".output"))
+
+    @field_validator("output_dir")
+    @classmethod
+    def _refuse_non_directory_output_dir(cls, value: Path) -> Path:
+        """Reject a path that exists but is not a directory."""
+        expanded = value.expanduser()
+        if expanded.exists() and not expanded.is_dir():
+            raise ValueError(f"TRINO_OUTPUT_DIR is not a directory: {expanded}")
+        return value
 
     @model_validator(mode="after")
     def _refuse_cleartext_password(self) -> "Config":

@@ -89,8 +89,17 @@ startup, so the process starts and answers `list_tools` while the cluster is dow
   `exc.errors(include_input=False)`. Both halves are load-bearing; the mask is not a
   reason to drop the second. A password is also refused over `TRINO_HTTP_SCHEME=http`,
   because the trino client sends BasicAuthentication over plain http without objecting.
-- **`output_file` is jailed** under `TRINO_OUTPUT_DIR`; the path comes from the model and
-  query results are untrusted input.
+- **The model never picks an output path.** `execute_query` takes `output_file_format`
+  (`csv`/`json`) and the server names the file `<timestamp>-<slug>.<ext>` under
+  `TRINO_OUTPUT_DIR`. An earlier revision took a model-supplied path and confined it to
+  that directory, which could not stop `output_file="README.md"` — the jail's own root
+  defaulted to the working tree. The format is also passed down to `_drain_to_file` rather
+  than sniffed from the suffix, so the extension always matches the bytes.
+- **Exports drain to `.<name>.partial` and are renamed only on success.** That name is the
+  reason a failed export leaves nothing: it is server-generated and never reaches the
+  caller on the error path, so nobody downstream could clean up an orphan. Unlinking the
+  temp also defuses the thread a timeout abandons — it writes on into a removed inode
+  instead of growing a file under the name the caller was told about.
 - **Logs go to stderr.** Under stdio transport stdout carries JSON-RPC framing; a stray
   `print` desynchronises the client.
 

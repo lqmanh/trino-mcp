@@ -12,9 +12,9 @@ An MCP server for querying [Trino](https://trino.io) from an AI agent harness.
 - **Query timeouts.** Queries exceeding `TRINO_QUERY_TIMEOUT_MINUTES` are  
   cancelled on the cluster, so they stop consuming resources rather than just being
   abandoned.
-- **File export.** Pass `output_file` and rows stream straight to CSV or JSON on disk —
-  uncapped, never entering the conversation — ready for pandas or DuckDB. Paths are
-  confined to `TRINO_OUTPUT_DIR`.
+- **File export.** Set `output_file_format` to `csv` or `json` and rows stream straight to
+  disk — uncapped, never entering the conversation — ready for pandas or DuckDB. The model
+  chooses the format; the server chooses the filename, under `TRINO_OUTPUT_DIR`.
 - **Compact columnar results.** `{"columns": [...], "rows": [[...]]}`, so column names
   aren't repeated on every row.
 - **Password authentication** over HTTPS, with credentials read only from the environment
@@ -36,19 +36,19 @@ An MCP server for querying [Trino](https://trino.io) from an AI agent harness.
 
 All settings come from the environment and are validated at startup.
 
-| Variable                      | Default         | Notes                          |
-| ----------------------------- | --------------- | ------------------------------ |
-| `TRINO_HOST`                  | `localhost`     |                                |
-| `TRINO_PORT`                  | `8443` / `8080` | follows `TRINO_HTTP_SCHEME`    |
-| `TRINO_USER`                  | **required**    | your Trino account             |
-| `TRINO_PASSWORD`              | —               | enables basic auth             |
-| `TRINO_HTTP_SCHEME`           | `https`         |                                |
-| `TRINO_CATALOG`               | —               | default catalog                |
-| `TRINO_SCHEMA`                | —               | default schema                 |
-| `TRINO_MAX_ROWS`              | `1000`          | `0` disables the cap           |
-| `TRINO_QUERY_TIMEOUT_MINUTES` | `5`             | `0` disables the timeout       |
-| `TRINO_ALLOW_WRITES`          | `false`         |                                |
-| `TRINO_OUTPUT_DIR`            | cwd             | `output_file` is confined here |
+| Variable                      | Default         | Notes                           |
+| ----------------------------- | --------------- | ------------------------------- |
+| `TRINO_HOST`                  | `localhost`     |                                 |
+| `TRINO_PORT`                  | `8443` / `8080` | follows `TRINO_HTTP_SCHEME`     |
+| `TRINO_USER`                  | **required**    | your Trino account              |
+| `TRINO_PASSWORD`              | —               | enables basic auth              |
+| `TRINO_HTTP_SCHEME`           | `https`         |                                 |
+| `TRINO_CATALOG`               | —               | default catalog                 |
+| `TRINO_SCHEMA`                | —               | default schema                  |
+| `TRINO_MAX_ROWS`              | `1000`          | `0` disables the cap            |
+| `TRINO_QUERY_TIMEOUT_MINUTES` | `5`             | `0` disables the timeout        |
+| `TRINO_ALLOW_WRITES`          | `false`         |                                 |
+| `TRINO_OUTPUT_DIR`            | `.output`       | exports land here; auto-created |
 
 A password requires `https`; pairing it with `TRINO_HTTP_SCHEME=http` is refused at
 startup rather than sent in cleartext.

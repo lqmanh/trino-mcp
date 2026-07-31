@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -52,6 +54,28 @@ def test_password_is_refused_over_plain_http(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("TRINO_HTTP_SCHEME", "http")
 
     with pytest.raises(ValidationError, match="cleartext"):
+        Config.from_env()
+
+
+def test_output_dir_defaults_to_dot_output_and_need_not_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Both are what the export path relies on: it creates the directory itself."""
+    assert Config.from_env().output_dir == Path(".output")
+
+    monkeypatch.setenv("TRINO_OUTPUT_DIR", str(tmp_path / "created" / "later"))
+    assert Config.from_env().output_dir.name == "later"
+
+
+def test_output_dir_pointing_at_a_file_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Otherwise it surfaces as a raw errno at the first export, not at startup."""
+    not_a_dir = tmp_path / "results.csv"
+    not_a_dir.write_text("")
+    monkeypatch.setenv("TRINO_OUTPUT_DIR", str(not_a_dir))
+
+    with pytest.raises(ValidationError, match="not a directory"):
         Config.from_env()
 
 

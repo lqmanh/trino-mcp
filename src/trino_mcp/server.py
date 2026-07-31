@@ -4,17 +4,18 @@ import json
 import logging
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from importlib.metadata import version
-from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import anyio.to_thread
+from coolname import generate_slug
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, ValidationError
 
-from .client import QueryResult, QueryTimeout, TrinoClient
+from .client import OutputFormat, QueryResult, QueryTimeout, TrinoClient
 from .config import Config
 from .sql import is_read_only
 
@@ -77,9 +78,9 @@ def _instructions(config: Config) -> str:
         f"- Queries are cancelled after {timeout}.\n"
         f"- Write statements are {writes}.\n"
         "- To pull a large result set out for downstream processing, pass "
-        "output_file to `execute_query`: the rows go straight to disk uncapped and "
-        "never "
-        "enter this conversation."
+        "output_file_format to `execute_query`: the rows go straight to disk "
+        "uncapped and never enter this conversation. The server picks the "
+        "filename and returns it."
     )
 
 
@@ -95,6 +96,11 @@ def _split_table(table: str, catalog: str, schema: str) -> tuple[str, str, str]:
     if len(parts) == 2:
         return catalog, schema or parts[0], parts[1]
     return catalog, schema, table
+
+
+def _generate_filename(fmt: OutputFormat) -> str:
+    ts = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
+    return f"{ts}-{generate_slug(3)}.{fmt}"
 
 
 def create_server(client: TrinoClient, config: Config) -> MCPServer:
@@ -131,24 +137,8 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
             )
         return cat, sch, tbl
 
-    # Resolved once: config is frozen, and pinning the root at startup stops a
-    # symlink swapped in later from re-pointing the jail.
+    # Resolved once: config is frozen.
     output_root = config.output_dir.expanduser().resolve()
-
-    def resolve_output(output_file: str) -> Path:
-        """Confine an output path to TRINO_OUTPUT_DIR.
-
-        The path is chosen by the model, and query results are untrusted input,
-        so text arriving from the warehouse must not be able to steer a write
-        anywhere on the filesystem.
-        """
-        candidate = (output_root / Path(output_file).expanduser()).resolve()
-        if candidate != output_root and output_root not in candidate.parents:
-            raise ToolError(
-                f"output_file must stay inside {output_root}. Set TRINO_OUTPUT_DIR to write elsewhere."
-            )
-        candidate.parent.mkdir(parents=True, exist_ok=True)
-        return candidate
 
     @server.tool()
     async def list_catalogs() -> Catalogs:
@@ -222,22 +212,27 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
     @server.tool(structured_output=False)
     async def execute_query(
         sql: Annotated[str, Field(description="The SQL statement to run.")],
-        output_file: Annotated[
-            str,
+        output_file_format: Annotated[
+            OutputFormat | None,
             Field(
                 description=(
-                    "Optional path, relative to the server's output directory. When "
-                    "set, all rows are written there uncapped and only a count is "
-                    "returned — use this for result sets too large to read."
+                    "Set to csv or json to write the whole result set to a file on "
+                    "the server instead of returning rows. Only the path and a row "
+                    "count come back — use this for result sets too large to read. "
+                    "The server names the file; you cannot choose where it goes."
                 )
             ),
-        ] = "",
+        ] = None,
     ) -> TextContent:
         """Run a SQL query and return the rows.
 
         Results come back columnar: {"columns": [...], "rows": [[...]], ...}.
         A "truncated": true field means the row cap cut the result short and you
         are seeing a partial answer.
+
+        Pass output_file_format to send the full result to a file instead; the
+        reply is then {"path": ..., "rows_written": N} and the rows never enter
+        this conversation. Read the file yourself if you need its contents.
 
         Read-only by default; write statements are rejected unless the server was
         started with TRINO_ALLOW_WRITES=true.
@@ -250,9 +245,12 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
                 "TRINO_ALLOW_WRITES=true to permit writes."
             )
 
-        if output_file:
-            destination = resolve_output(output_file)
-            written = await call(client.execute_to_file, sql, destination)
+        if output_file_format is not None:
+            await call(lambda: output_root.mkdir(parents=True, exist_ok=True))
+            destination = output_root / _generate_filename(output_file_format)
+            written = await call(
+                client.execute_to_file, sql, destination, output_file_format
+            )
             payload = FileWritten(
                 path=str(destination), rows_written=written
             ).model_dump()

@@ -13,18 +13,18 @@ pinned to the commit that was read, so they keep resolving to the code described
 
 ## At a glance
 
-|                    | mcp-trino                                   | mcp-trino-python | trino-mcp                   | **this**               |
-| ------------------ | ------------------------------------------- | ---------------- | --------------------------- | ---------------------- |
-| Language           | Go                                          | Python           | Python                      | Python                 |
-| Tools              | 6                                           | 22               | 8                           | 6                      |
-| Read-only guard    | regex + keywords                            | none             | sqlglot AST                 | sqlglot AST            |
-| Row limit          | yes, + truncated flag                       | no               | no                          | yes, + truncated flag  |
-| Query timeout      | context deadline                            | no               | yes, cancels                | yes, cancels           |
-| Identifier quoting | no                                          | no               | no                          | **yes**                |
-| Result shape       | row dicts                                   | row dicts        | row dicts                   | **columnar**           |
-| File export        | no                                          | no               | yes                         | yes, uncapped + jailed |
-| Auth               | password, OAuth2, JWT, Azure, impersonation | password         | password, OAuth2, Azure SPN | password               |
-| Transport          | stdio, HTTP, SSE                            | stdio, HTTP, SSE | stdio                       | stdio                  |
+|                    | mcp-trino                                   | mcp-trino-python | trino-mcp                   | **this**              |
+| ------------------ | ------------------------------------------- | ---------------- | --------------------------- | --------------------- |
+| Language           | Go                                          | Python           | Python                      | Python                |
+| Tools              | 6                                           | 22               | 8                           | 6                     |
+| Read-only guard    | regex + keywords                            | none             | sqlglot AST                 | sqlglot AST           |
+| Row limit          | yes, + truncated flag                       | no               | no                          | yes, + truncated flag |
+| Query timeout      | context deadline                            | no               | yes, cancels                | yes, cancels          |
+| Identifier quoting | no                                          | no               | no                          | **yes**               |
+| Result shape       | row dicts                                   | row dicts        | row dicts                   | **columnar**          |
+| File export        | no                                          | no               | yes                         | yes                   |
+| Auth               | password, OAuth2, JWT, Azure, impersonation | password         | password, OAuth2, Azure SPN | password              |
+| Transport          | stdio, HTTP, SSE                            | stdio, HTTP, SSE | stdio                       | stdio                 |
 
 `mcp-trino` is solving a materially larger problem than this project does — multi-tenant,
 deployed, SSO — and ships a CLI, a REPL, and Helm charts alongside the server. Most of
@@ -183,8 +183,5 @@ Trade-offs, not corrections.
   [initialises `config` and `client` to `None` at import](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/server.py#L24-L34)
   and populates them in `main()`; this project passes the client into `create_server()`,
   so tests hand in a fake rather than patching module state.
-- **Output paths are confined.** `trino-mcp` writes wherever the tool call asks. Here the
-  path resolves under `TRINO_OUTPUT_DIR` and anything escaping it is refused — query
-  results are untrusted input.
 - **File export ignores the row cap.** Exporting exists to move a whole result set; rows
   stream in batches instead.
