@@ -1,14 +1,12 @@
-import contextlib
-from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 from mcp import Client
 
-from trino_mcp import Config, create_server
+from trino_mcp import Config
 from trino_mcp.client import QueryResult
 
-from .conftest import FakeTrino, payload, texts
+from .conftest import payload, serving, texts
 
 pytestmark = pytest.mark.anyio
 
@@ -20,13 +18,6 @@ TOOLS = {
     "execute_query",
     "explain_query",
 }
-
-
-@contextlib.asynccontextmanager
-async def serving(config: Config, **results: Any) -> AsyncIterator[Client]:
-    """An MCP client over a server whose Trino results the test supplies."""
-    async with Client(create_server(FakeTrino(config, **results), config)) as client:
-        yield client
 
 
 async def test_the_expected_tools_are_exposed(connected: Client) -> None:

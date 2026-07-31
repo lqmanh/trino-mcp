@@ -131,6 +131,10 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
             )
         return cat, sch, tbl
 
+    # Resolved once: config is frozen, and pinning the root at startup stops a
+    # symlink swapped in later from re-pointing the jail.
+    output_root = config.output_dir.expanduser().resolve()
+
     def resolve_output(output_file: str) -> Path:
         """Confine an output path to TRINO_OUTPUT_DIR.
 
@@ -138,11 +142,10 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
         so text arriving from the warehouse must not be able to steer a write
         anywhere on the filesystem.
         """
-        root = config.output_dir.expanduser().resolve()
-        candidate = (root / Path(output_file).expanduser()).resolve()
-        if candidate != root and root not in candidate.parents:
+        candidate = (output_root / Path(output_file).expanduser()).resolve()
+        if candidate != output_root and output_root not in candidate.parents:
             raise ToolError(
-                f"output_file must stay inside {root}. Set TRINO_OUTPUT_DIR to write elsewhere."
+                f"output_file must stay inside {output_root}. Set TRINO_OUTPUT_DIR to write elsewhere."
             )
         candidate.parent.mkdir(parents=True, exist_ok=True)
         return candidate
@@ -188,6 +191,15 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
         """Show a table's columns, types, and comments.
 
         Call this before writing a query against an unfamiliar table.
+
+        Two things this does not return are worth a follow-up `execute_query`
+        against the fully qualified name:
+        - `SHOW STATS FOR <catalog.schema.table>` — row count, distinct values,
+          null fractions, and data size. Check these before a query that could
+          hit the row cap or the timeout.
+        - `SHOW CREATE TABLE <catalog.schema.table>` — partitioning, file
+          format, and location. Filtering on a partition column is the main
+          thing that keeps a large table cheap to query.
         """
         cat, sch, tbl = resolve_target(table, catalog, schema)
         result: QueryResult = await call(client.describe_table, cat, sch, tbl)

@@ -6,6 +6,7 @@ Everything here is synchronous. The server layer runs it off the event loop.
 import csv
 import json
 import logging
+import queue
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,7 +118,7 @@ class TrinoClient:
 
     def execute(self, query: str) -> QueryResult:
         """Run a statement and return at most ``max_rows`` rows."""
-        return self._attempt(lambda cursor: self._collect(cursor), query)
+        return self._attempt(self._collect, query)
 
     def execute_to_file(self, query: str, path: Path) -> int:
         """Stream every row to ``path`` and return how many were written.
@@ -165,31 +166,32 @@ class TrinoClient:
             cursor.execute(query)
             return consume(cursor)
 
-        outcome: dict[str, Any] = {}
-        finished = threading.Event()
+        # A raw daemon thread rather than a ThreadPoolExecutor: the executor joins
+        # its workers at interpreter exit, so one runaway query would hang shutdown.
+        outcome: queue.Queue[Any] = queue.Queue(maxsize=1)
 
         def work() -> None:
             try:
                 cursor.execute(query)
-                outcome["value"] = consume(cursor)
+                outcome.put(consume(cursor))
             except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
-                outcome["error"] = exc
-            finally:
-                finished.set()
+                outcome.put(exc)
 
         threading.Thread(target=work, daemon=True).start()
 
-        if not finished.wait(minutes * 60):
+        try:
+            result = outcome.get(timeout=minutes * 60)
+        except queue.Empty:
             query_id = self._cancel(cursor)
             raise QueryTimeout(
                 f"Query exceeded the {minutes:g}-minute timeout and was cancelled "
                 f"(query_id={query_id or 'unknown'}). Narrow it with WHERE or LIMIT, "
                 "avoid SELECT * on large tables, or raise TRINO_QUERY_TIMEOUT_MINUTES."
-            )
+            ) from None
 
-        if "error" in outcome:
-            raise outcome["error"]
-        return outcome["value"]
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
     def _cancel(self, cursor: Cursor) -> str | None:
         query_id = getattr(cursor, "query_id", None)
@@ -205,7 +207,9 @@ class TrinoClient:
         # timeout is most likely to catch. The REST call is the reliable path.
         if query_id:
             config = self._config
-            url = f"{config.http_scheme}://{config.host}:{config.port}/v1/query/{query_id}"
+            url = (
+                f"{config.http_scheme}://{config.host}:{config.port}/v1/query/{query_id}"
+            )
             try:
                 session = getattr(
                     getattr(cursor, "_request", None), "_http_session", None
@@ -227,9 +231,7 @@ class TrinoClient:
         columns = [column[0] for column in cursor.description]
         cap = self._config.max_rows
         if cap <= 0:
-            return QueryResult(
-                columns=columns, rows=list(cursor.fetchall()), truncated=False
-            )
+            return QueryResult(columns=columns, rows=cursor.fetchall(), truncated=False)
 
         # Fetch one extra row: its presence is what distinguishes "exactly at the
         # cap" from "there was more", and the model needs to be told which.
@@ -286,17 +288,17 @@ class TrinoClient:
 
     # -- metadata --------------------------------------------------------------
 
+    def _names(self, query: str) -> list[str]:
+        return [row[0] for row in self.execute(query).rows]
+
     def list_catalogs(self) -> list[str]:
-        return [row[0] for row in self.execute("SHOW CATALOGS").rows]
+        return self._names("SHOW CATALOGS")
 
     def list_schemas(self, catalog: str) -> list[str]:
-        return [
-            row[0] for row in self.execute(f"SHOW SCHEMAS FROM {qualify(catalog)}").rows
-        ]
+        return self._names(f"SHOW SCHEMAS FROM {qualify(catalog)}")
 
     def list_tables(self, catalog: str, schema: str) -> list[str]:
-        target = qualify(catalog, schema)
-        return [row[0] for row in self.execute(f"SHOW TABLES FROM {target}").rows]
+        return self._names(f"SHOW TABLES FROM {qualify(catalog, schema)}")
 
     def describe_table(self, catalog: str, schema: str, table: str) -> QueryResult:
         return self.execute(f"DESCRIBE {qualify(catalog, schema, table)}")

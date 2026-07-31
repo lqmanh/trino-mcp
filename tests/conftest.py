@@ -3,8 +3,9 @@
 Nothing here talks to a Trino cluster; the suite runs offline.
 """
 
+import contextlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
@@ -124,15 +125,17 @@ class FakeTrino(TrinoClient):
         return self.results.get("explain", "")
 
 
-@pytest.fixture
-async def connected() -> AsyncIterator[Client]:
-    """An MCP client wired to a server with no useful data behind it.
+@contextlib.asynccontextmanager
+async def serving(config: Config, **results: Any) -> AsyncGenerator[Client]:
+    """An MCP client over a server whose Trino results the test supplies."""
+    async with Client(create_server(FakeTrino(config, **results), config)) as client:
+        yield client
 
-    Enough for protocol-level assertions; tests needing real results build their
-    own server with `serving`.
-    """
-    config = Config(host="trino.invalid", user="tester")
-    async with Client(create_server(FakeTrino(config), config)) as client:
+
+@pytest.fixture
+async def connected(config: Config) -> AsyncGenerator[Client]:
+    """`serving` with nothing behind it — enough for protocol-level assertions."""
+    async with serving(config) as client:
         yield client
 
 
