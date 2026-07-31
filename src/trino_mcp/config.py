@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 
 # Trino's defaults differ by scheme, so an unset TRINO_PORT resolves against
 # TRINO_HTTP_SCHEME rather than a single constant.
@@ -22,9 +22,7 @@ class Config(BaseModel):
     host: str = "localhost"
     port: int = Field(default=8443, ge=1, le=65535)
     user: str = Field(min_length=1)
-    # repr=False keeps the password out of tracebacks and log lines that
-    # happen to interpolate the config.
-    password: str | None = Field(default=None, repr=False)
+    password: SecretStr | None = None
     http_scheme: Literal["http", "https"] = "https"
     catalog: str | None = None
     # `schema` would shadow an attribute on BaseModel, hence the prefix.
@@ -82,14 +80,3 @@ class Config(BaseModel):
         # model_validate rather than cls(**values): these are strings off the
         # environment, and this is exactly the coerce-and-validate path.
         return cls.model_validate(values)
-
-    @property
-    def summary(self) -> str:
-        """A one-line description safe to log — never includes the password."""
-        auth = "password" if self.password else "none"
-        return (
-            f"{self.http_scheme}://{self.host}:{self.port} "
-            f"user={self.user} auth={auth} "
-            f"max_rows={self.max_rows} timeout={self.query_timeout_minutes:g}m "
-            f"writes={'on' if self.allow_writes else 'off'}"
-        )

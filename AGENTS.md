@@ -37,12 +37,16 @@ specific error text.
 
 Four modules, layered bottom-up, each importing only from those below it:
 
-| Module        | Role                                                              |
-| ------------- | ----------------------------------------------------------------- |
-| `config.py`   | Frozen pydantic `Config`, built once by `from_env()` at startup   |
-| `sql.py`      | `is_read_only()` — sqlglot AST guard; `normalize()`               |
-| `client.py`   | Blocking Trino access: caps, deadlines, cancellation, file export |
-| `__init__.py` | MCP tool definitions, `create_server()`, `main()`                 |
+| Module      | Role                                                              |
+| ----------- | ----------------------------------------------------------------- |
+| `config.py` | Frozen pydantic `Config`, built once by `from_env()` at startup   |
+| `sql.py`    | `is_read_only()` — sqlglot AST guard; `normalize()`               |
+| `client.py` | Blocking Trino access: caps, deadlines, cancellation, file export |
+| `server.py` | MCP tool definitions, `create_server()`, `main()`                 |
+
+`__init__.py` is a facade: it re-exports the public names and nothing else. `__version__`
+is defined in `server.py` and re-exported from there, not the reverse — the package root
+importing a submodule that imports back is the cycle this layout avoids.
 
 **`create_server(client, config)` takes the client as an argument.** There is no
 module-level mutable state, which is what lets every server test hand in a fake instead of
@@ -71,15 +75,20 @@ startup, so the process starts and answers `list_tools` while the cluster is dow
   the first page is ready while the query keeps running. On expiry the query is cancelled
   server-side: `cursor.cancel()` no-ops while `_next_uri` is unset, so a
   `DELETE /v1/query/{id}` fallback follows.
-- **Retry is transport-only.** `TrinoQueryError` means the cluster understood the
-  statement and rejected it; retrying would run a failing, possibly non-idempotent
-  statement twice.
-- **The password must never reach a log line.** `Config.password` is `repr=False`,
-  `summary` omits it, and `main()` formats config errors from
-  `exc.errors(include_input=False)` — pydantic attaches the offending input to every
-  error, and the input is the environment dict. It is also refused over
-  `TRINO_HTTP_SCHEME=http`, because the trino client sends BasicAuthentication over plain
-  http without objecting.
+- **Retry is transport-only, and read-only.** `TrinoQueryError` means the cluster
+  understood the statement and rejected it. A transport failure means less than it looks:
+  Trino keeps executing after the client socket drops, so a retried write can land twice.
+  `_attempt` re-runs a statement only when `is_read_only()` says repeating it is harmless
+  — note that this holds regardless of `TRINO_ALLOW_WRITES`, which is set in the harness
+  config and can change without anyone revisiting this code.
+- **The password must never reach a log line.** `Config.password` is a `SecretStr`, so it
+  masks in reprs, f-strings, and `model_dump()`, and reading it takes an explicit
+  `get_secret_value()` — that is why the whole config is safe to log. `SecretStr` does
+  **not** cover a `ValidationError`: pydantic reports the offending input, which here is
+  the raw environment dict, so `main()` formats config errors from
+  `exc.errors(include_input=False)`. Both halves are load-bearing; the mask is not a
+  reason to drop the second. A password is also refused over `TRINO_HTTP_SCHEME=http`,
+  because the trino client sends BasicAuthentication over plain http without objecting.
 - **`output_file` is jailed** under `TRINO_OUTPUT_DIR`; the path comes from the model and
   query results are untrusted input.
 - **Logs go to stderr.** Under stdio transport stdout carries JSON-RPC framing; a stray
@@ -113,7 +122,7 @@ verify it by mutating the source and watching it fail.
 
 ## Conventions
 
-- Python 3.13+, src layout, PEP 695 generics (`async def call[T](...)`).
+- PEP 695 generics (`async def call[T](...)`) rather than `TypeVar`.
 - **Comment sparingly.** Write one when the code cannot speak for itself: a non-obvious
   _why_, an edge case, a library quirk, a decision that looks wrong until you know the
   reason. Several of the ones here encode findings that cost real debugging. Skip the rest
@@ -127,8 +136,5 @@ verify it by mutating the source and watching it fail.
 - **Declare every runtime import in `[project.dependencies]`**, including packages `mcp`
   already pulls in. No lockfile reaches users, so relying on a transitive dependency means
   relying on `mcp` never dropping it.
-- Prose in markdown is hard-wrapped by prettier (`proseWrap: always`). Re-run it after
-  editing copy or lines drift ragged.
 - `docs/comparisons.md` cites three reference implementations via SHA-pinned GitHub
-  permalinks so they survive upstream code movement. Local checkouts are listed in
-  `opencode.jsonc` under `references`.
+  permalinks so they survive upstream code movement.

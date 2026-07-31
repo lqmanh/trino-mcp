@@ -32,3 +32,9 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 addopts = "--cov=trino_mcp"
+
+[tool.ruff]
+line-length = 90
+
+[tool.ruff.lint]
+extend-select = ["G"]

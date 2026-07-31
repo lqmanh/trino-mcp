@@ -16,7 +16,7 @@ from trino.dbapi import Connection, Cursor
 from trino.exceptions import TrinoQueryError
 
 from .config import Config
-from .sql import normalize
+from .sql import is_read_only, normalize
 
 log = logging.getLogger(__name__)
 
@@ -77,11 +77,13 @@ class TrinoClient:
     def _connect(self) -> Connection:
         config = self._config
         auth = (
-            trino.auth.BasicAuthentication(config.user, config.password)
+            trino.auth.BasicAuthentication(
+                config.user, config.password.get_secret_value()
+            )
             if config.password
             else None
         )
-        log.info("connecting to Trino: %s", config.summary)
+        log.info("connecting to Trino: %s", config)
         return trino.dbapi.connect(
             host=config.host,
             port=config.port,
@@ -140,7 +142,13 @@ class TrinoClient:
             return self._guarded(self._cursor(), text, consume)
         except (QueryTimeout, TrinoQueryError):
             raise
-        except Exception:  # noqa: BLE001 - anything else is transport-level; retry once
+        except Exception:
+            # Anything reaching here is transport-level. A dropped socket is not
+            # evidence the statement did not run: Trino keeps executing after
+            # the client goes away, so a retried write can land twice.
+            if not is_read_only(text):
+                log.warning("not retrying a write statement after a transport failure")
+                raise
             log.info("retrying on a fresh connection after a transport failure")
             self._reset()
             return self._guarded(self._cursor(), text, consume)

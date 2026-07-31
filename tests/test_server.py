@@ -35,9 +35,7 @@ async def test_the_expected_tools_are_exposed(connected: Client) -> None:
 
 
 @pytest.mark.parametrize("truncated", [False, True])
-async def test_query_returns_the_columnar_shape(
-    config: Config, truncated: bool
-) -> None:
+async def test_query_returns_the_columnar_shape(config: Config, truncated: bool) -> None:
     """Both flag values matter: a partial answer the model reads as complete is a bug."""
     result = QueryResult(columns=["a", "b"], rows=[[1, 2], [3, 4]], truncated=truncated)
     async with serving(config, execute=result) as client:

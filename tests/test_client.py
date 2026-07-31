@@ -93,9 +93,7 @@ def test_writing_csv_ignores_the_cap_and_reports_the_count(
     assert contents[-1] == ["2499"]
 
 
-def test_writing_json_produces_a_parseable_array(
-    config: Config, tmp_path: Path
-) -> None:
+def test_writing_json_produces_a_parseable_array(config: Config, tmp_path: Path) -> None:
     cursor = FakeCursor(["n"], rows(3))
     destination = tmp_path / "out.json"
 
@@ -150,13 +148,26 @@ def test_a_transport_failure_is_retried_on_a_fresh_connection(config: Config) ->
     assert client.connects == 2  # the stale connection was dropped and remade
 
 
-def test_a_rejected_statement_is_not_run_twice(config: Config) -> None:
-    """Trino understood it and said no; a retry would re-run a failing write."""
-    error = TrinoQueryError({"errorName": "SYNTAX_ERROR", "message": "nope"}, "q1")
+@pytest.mark.parametrize(
+    ("error", "query"),
+    [
+        # Trino understood it and said no; a retry would re-run a failure.
+        (
+            TrinoQueryError({"errorName": "SYNTAX_ERROR", "message": "nope"}, "q1"),
+            "SELECT n",
+        ),
+        # A dropped socket is not evidence the write did not run — the cluster
+        # keeps executing after the client goes away, so a retry can land twice.
+        (OSError("connection reset"), "INSERT INTO t VALUES (1)"),
+    ],
+)
+def test_statements_that_could_land_twice_are_not_retried(
+    config: Config, error: Exception, query: str
+) -> None:
     cursor = FailingCursor(["n"], rows(1), error)
     client = client_over(config, cursor)
 
-    with pytest.raises(TrinoQueryError):
-        client.execute("SELECT n")
+    with pytest.raises(type(error)):
+        client.execute(query)
 
     assert cursor.attempts == 1

@@ -107,6 +107,19 @@ This project quotes every identifier and doubles embedded quotes
 ([`src/trino_mcp/client.py`](../src/trino_mcp/client.py)), with a test asserting
 `a"; DROP TABLE x --` cannot escape.
 
+### Password auth over plain HTTP
+
+Two of the three default `http_scheme` to `http` and attach basic auth anyway.
+`mcp-trino-python`
+[builds `BasicAuthentication` whenever `TRINO_PASSWORD` is set](https://github.com/alaturqua/mcp-trino-python/blob/ea1300e228f8a95eea38c9804487614bbf7e78a4/src/config.py#L28-L39),
+and `trino-mcp`'s
+[`PASSWORD` branch — its default `AUTH_METHOD` — never touches the scheme](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/config.py#L154-L167),
+which only the OAuth2 and Azure paths raise to `https`. `mcp-trino` defaults to `https`.
+
+Nothing downstream catches it: the trino client attaches the credential base64-encoded and
+sends it without complaint. Trino refuses password auth without TLS, but by then the
+password has crossed the network. This project rejects the pairing at startup.
+
 ### Retry scope on non-idempotent statements
 
 `trino-mcp`
@@ -115,7 +128,9 @@ around `cursor.execute()` and retries once on a fresh connection, treating a
 `TrinoQueryError` — the cluster understood the statement and rejected it — the same as a
 dropped socket. A failing write can run twice.
 
-Here the retry covers transport failures only; `TrinoQueryError` propagates immediately.
+Here `TrinoQueryError` propagates immediately, and a transport failure is retried only for
+read-only statements — a dropped socket is not evidence the statement did not run, since
+Trino keeps executing after the client goes away.
 
 ### `Field()` as a parameter default
 

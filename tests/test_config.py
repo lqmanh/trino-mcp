@@ -55,15 +55,20 @@ def test_password_is_refused_over_plain_http(monkeypatch: pytest.MonkeyPatch) ->
         Config.from_env()
 
 
-def test_summary_reports_auth_without_leaking_the_password(
+def test_the_password_is_masked_everywhere_it_travels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The startup line is how an operator sees whether auth is actually on."""
-    assert "auth=none" in Config.from_env().summary
+    """The config is logged whole at startup, so the field itself must be safe.
 
+    SecretStr guards the value rather than one container's repr, so the paths a
+    future edit is most likely to reach for are all pinned here.
+    """
     monkeypatch.setenv("TRINO_PASSWORD", "hunter2")
     config = Config.from_env()
 
-    assert "auth=password" in config.summary
-    assert "hunter2" not in config.summary
     assert "hunter2" not in repr(config)
+    assert "hunter2" not in str(config)
+    assert "hunter2" not in f"{config.password}"
+    assert "hunter2" not in str(config.model_dump())
+    assert config.password is not None
+    assert config.password.get_secret_value() == "hunter2"
