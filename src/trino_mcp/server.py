@@ -1,5 +1,3 @@
-"""MCP tool definitions, the server factory, and the stdio entry point."""
-
 import json
 import logging
 import sys
@@ -15,7 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, ValidationError
 
-from .client import OutputFormat, QueryResult, QueryTimeout, TrinoClient
+from .client import OutputFormat, QueryRejected, QueryResult, QueryTimeout, TrinoClient
 from .config import Config
 from .sql import is_read_only
 
@@ -75,7 +73,7 @@ def _instructions(config: Config) -> str:
         f"- Results are capped at {cap}; a truncated result sets truncated=true, "
         "which means you are seeing a partial answer. Add LIMIT or filters rather "
         "than assuming the rows shown are all of them.\n"
-        f"- Queries are cancelled after {timeout}.\n"
+        f"- Queries are canceled after {timeout}.\n"
         f"- Write statements are {writes}.\n"
         "- To pull a large result set out for downstream processing, pass "
         "output_file_format to `execute_query`: the rows go straight to disk "
@@ -116,10 +114,9 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
     )
 
     async def call[T](func: Callable[..., T], *args: Any) -> T:
-        """Run a blocking client call off the event loop, as a tool-shaped error."""
         try:
             return await anyio.to_thread.run_sync(func, *args)
-        except QueryTimeout as exc:
+        except (QueryTimeout, QueryRejected) as exc:
             raise ToolError(str(exc)) from exc
         except Exception as exc:
             log.exception("Trino call failed")
@@ -272,7 +269,15 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
     async def explain_query(
         sql: Annotated[str, Field(description="The SQL statement to explain.")],
         plan_format: Annotated[
-            PlanFormat, Field(description="Plan detail to return.")
+            PlanFormat,
+            Field(
+                description=(
+                    "Which plan to return: LOGICAL for the shape of the query, "
+                    "DISTRIBUTED to see stage boundaries and data movement, IO "
+                    "for the tables and partitions it would read, VALIDATE to "
+                    "only check that the statement is valid."
+                )
+            ),
         ] = "LOGICAL",
     ) -> Plan:
         """Show how Trino would execute a query, without running it.

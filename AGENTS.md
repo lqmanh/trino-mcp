@@ -7,15 +7,12 @@ repository.
 
 ```bash
 uv sync                                              # install, including dev group
-uv run pytest                                        # full suite, offline, ~2s
+uv run pytest                                        # full suite
 uv run pytest tests/test_client.py -k truncation     # one file / one pattern
 uv run pytest "tests/test_sql.py::test_reads_are_allowed[SHOW CATALOGS]"
 uv run ruff check && uv run ruff format --check && uv run ty check
-npx prettier --write README.md docs/                 # markdown only
+npx prettier --write .
 ```
-
-`ty` is the type checker. Editor Pyright, if enabled, reports false import errors and
-"union syntax requires 3.10+" — it is not pointed at the venv and its output is noise.
 
 ### Verifying through uvx
 
@@ -72,7 +69,7 @@ startup, so the process starts and answers `list_tools` while the cluster is dow
   "exactly at the cap" from "there is more", which decides the `truncated` flag. A partial
   result the model reads as complete is a correctness bug.
 - **The timeout deadline covers execute _and_ consume.** Trino's `execute` returns once
-  the first page is ready while the query keeps running. On expiry the query is cancelled
+  the first page is ready while the query keeps running. On expiry the query is canceled
   server-side: `cursor.cancel()` no-ops while `_next_uri` is unset, so a
   `DELETE /v1/query/{id}` fallback follows.
 - **Retry is transport-only, and read-only.** `TrinoQueryError` means the cluster
@@ -124,7 +121,7 @@ console script; note that MCP clients forward only a fixed allowlist (`HOME`, `L
 `PATH`, `SHELL`, `TERM`, `USER`) to a stdio server, so `TRINO_*` must be passed
 explicitly.
 
-Tests cover behaviour this project owns. Pydantic's constraint handling, sqlglot's parser,
+Tests cover behavior this project owns. Pydantic's constraint handling, sqlglot's parser,
 and library defaults are not re-tested, and cases that exercise a branch another test
 already covers get folded in rather than added. When claiming a test guards something,
 verify it by mutating the source and watching it fail.
@@ -132,11 +129,11 @@ verify it by mutating the source and watching it fail.
 ## Conventions
 
 - PEP 695 generics (`async def call[T](...)`) rather than `TypeVar`.
-- **Comment sparingly.** Write one when the code cannot speak for itself: a non-obvious
-  _why_, an edge case, a library quirk, a decision that looks wrong until you know the
-  reason. Several of the ones here encode findings that cost real debugging. Skip the rest
-  — a docstring that restates the function name, or a comment narrating the line below it,
-  is upkeep with no reader.
+- **Avoid unnecessary comments & docstrings.** Write one only when the code cannot speak
+  for itself: a non-obvious _why_, an edge case, a library quirk, a decision that looks
+  wrong until you know the reason. Several of the ones here encode findings that cost real
+  debugging. Skip the rest — a docstring that restates the function name, or a comment
+  narrating the line below it, is upkeep with no reader.
 - **MCP-facing docstrings are the exception, because they are API.** A tool function's
   docstring becomes the tool description sent to the model, and `Field(description=...)`
   becomes its schema. Write those for the agent that consumes them: what the tool is for,

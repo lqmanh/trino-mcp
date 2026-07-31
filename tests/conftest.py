@@ -38,7 +38,7 @@ class FakeCursor:
         self._offset = 0
         self.description: list[tuple[Any, ...]] | None = None
         self.executed: list[str] = []
-        self.cancelled = False
+        self.canceled = False
         self.query_id = "20260731_000000_00001_abcde"
 
     def execute(self, query: str) -> None:
@@ -56,7 +56,7 @@ class FakeCursor:
         return batch
 
     def cancel(self) -> None:
-        self.cancelled = True
+        self.canceled = True
 
 
 class FakeConnection:

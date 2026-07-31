@@ -1,11 +1,3 @@
-"""Read-only detection for Trino SQL.
-
-Parsing the statement and inspecting the AST is the only approach that holds up:
-keyword matching has to special-case every read-only statement that happens to
-contain a write keyword (``SHOW CREATE TABLE``, a column literally named
-``delete``), and it silently fails open on the cases it hasn't been taught.
-"""
-
 import logging
 
 import sqlglot
@@ -17,8 +9,7 @@ log = logging.getLogger(__name__)
 # which happens for perfectly ordinary SHOW and DESCRIBE statements.
 logging.getLogger("sqlglot").setLevel(logging.ERROR)
 
-# Statement types that modify data, schema, or grants. sqlglot normalises Trino
-# syntax onto these standard expression classes.
+# sqlglot normalizes Trino's write syntax onto these standard expression classes.
 _WRITE_TYPES = (
     exp.Alter,
     exp.Analyze,
@@ -83,7 +74,6 @@ def is_read_only(query: str) -> bool:
     if isinstance(statement, exp.Command):
         head = text.split(maxsplit=1)[0].upper()
         if head not in _READ_ONLY_COMMANDS:
-            # Anything else arriving as an unparsed Command is unknown, so refuse.
             return False
         # EXPLAIN ANALYZE actually runs the statement it is explaining.
         return not (head == "EXPLAIN" and "ANALYZE" in text.upper().split())

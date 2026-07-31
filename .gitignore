@@ -219,6 +219,7 @@ __marimo__/
 
 # Local agent-harness configs
 opencode.jsonc
+.mcp.json
 
 # Default TRINO_OUTPUT_DIR, so exports from a local run stay untracked
 .output/

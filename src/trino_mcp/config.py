@@ -1,5 +1,3 @@
-"""Trino connection settings, read once from the environment at startup."""
-
 import os
 from pathlib import Path
 from typing import Literal
@@ -12,10 +10,7 @@ _DEFAULT_PORTS = {"http": 8080, "https": 8443}
 
 
 class Config(BaseModel):
-    """Everything the server needs to reach a Trino cluster.
-
-    Frozen so a tool call cannot mutate the settings the process started with.
-    """
+    """Frozen so a tool call cannot mutate the settings the process started with."""
 
     model_config = {"frozen": True}
 
@@ -35,7 +30,6 @@ class Config(BaseModel):
     @field_validator("output_dir")
     @classmethod
     def _refuse_non_directory_output_dir(cls, value: Path) -> Path:
-        """Reject a path that exists but is not a directory."""
         expanded = value.expanduser()
         if expanded.exists() and not expanded.is_dir():
             raise ValueError(f"TRINO_OUTPUT_DIR is not a directory: {expanded}")
@@ -47,8 +41,7 @@ class Config(BaseModel):
 
         The trino client sends BasicAuthentication over http without complaint,
         so the credential reaches the wire base64-encoded before Trino rejects
-        it for want of TLS. An absent password is fine — unauthenticated
-        clusters are normal locally.
+        it for want of TLS.
         """
         if self.password and self.http_scheme == "http":
             raise ValueError(
@@ -61,9 +54,8 @@ class Config(BaseModel):
     def from_env(cls) -> "Config":
         """Build a config from TRINO_* environment variables.
 
-        Unset (or empty) variables fall back to the field defaults; set ones are
-        coerced and validated by pydantic, so a bad value fails at startup with a
-        readable message instead of at the first query.
+        A variable set to the empty string counts as unset and falls back to the
+        field default.
         """
         env = {
             "host": os.environ.get("TRINO_HOST"),
@@ -80,12 +72,10 @@ class Config(BaseModel):
         }
         values = {key: value for key, value in env.items() if value}
 
-        # Resolve the port default against the scheme actually in use. Kept as a
-        # string so pydantic does the coercion (and the range check) in one place.
+        # Kept as a string so pydantic does the coercion, and the range check,
+        # in one place.
         if "port" not in values:
             scheme = values.get("http_scheme", "https")
             values["port"] = str(_DEFAULT_PORTS.get(scheme, 8443))
 
-        # model_validate rather than cls(**values): these are strings off the
-        # environment, and this is exactly the coerce-and-validate path.
         return cls.model_validate(values)

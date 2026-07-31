@@ -1,8 +1,3 @@
-"""Blocking Trino access: row caps, query timeouts, and file output.
-
-Everything here is synchronous. The server layer runs it off the event loop.
-"""
-
 import csv
 import json
 import logging
@@ -22,21 +17,22 @@ from .sql import is_read_only, normalize
 
 log = logging.getLogger(__name__)
 
-# Rows pulled per round trip when streaming to a file.
 _FILE_BATCH = 1000
 
 OutputFormat = Literal["csv", "json"]
 
 
 class QueryTimeout(Exception):
-    """A query exceeded the configured deadline and was cancelled."""
+    """A query exceeded the configured deadline and was canceled."""
+
+
+class QueryRejected(Exception):
+    """Trino understood the statement and refused it."""
 
 
 @dataclass(frozen=True, slots=True)
 class QueryResult:
-    """Columnar results plus whether the row cap cut them short.
-
-    Deliberately not a pydantic model: it carries every row of every query, and
+    """Not a pydantic model on purpose: it carries every row of every query, and
     validating them would cost real time to prove something already known.
     """
 
@@ -62,17 +58,22 @@ def quote_ident(identifier: str) -> str:
 
 
 def qualify(*parts: str) -> str:
-    return ".".join(quote_ident(part) for part in parts if part)
+    if not parts or not all(parts):
+        raise ValueError(
+            f"catalog, schema, and table names must all be non-empty, got {parts}; "
+            "an empty one would silently address a different object"
+        )
+    return ".".join(quote_ident(part) for part in parts)
 
 
 def _column_names(cursor: Cursor) -> list[str] | None:
     """Column names of the current result set, or None when there is not one.
 
-    The cast corrects trino, which ships ``py.typed`` and declares
-    ``description -> List[ColumnDescription]`` while returning None whenever a
-    query finished or was cancelled before its columns arrived — a state the
-    timeout and truncation paths here both produce. Without it a checker narrows
-    ``is None`` to ``Never`` and reads every caller's guard as dead code.
+    trino ships ``py.typed`` and declares ``description -> List[ColumnDescription]``,
+    but returns None for a query that finished or was canceled before its
+    columns arrived — which the timeout and truncation paths both produce. The
+    cast is what stops a type checker narrowing ``is None`` to ``Never`` and reading
+    every caller's guard as dead code.
     """
     description = cast(list[ColumnDescription] | None, cursor.description)
     if description is None:
@@ -179,8 +180,12 @@ class TrinoClient:
         text = normalize(query)
         try:
             return self._guarded(self._cursor(), text, consume)
-        except (QueryTimeout, TrinoQueryError):
+        except QueryTimeout:
             raise
+        except TrinoQueryError as exc:
+            # Both branches skip the retry; this one also unwraps a repr that
+            # would otherwise reach the model with the message buried in it.
+            raise QueryRejected(f"{exc.error_name}: {exc.message}") from exc
         except Exception:
             # Anything reaching here is transport-level. A dropped socket is not
             # evidence the statement did not run: Trino keeps executing after
@@ -193,7 +198,7 @@ class TrinoClient:
             return self._guarded(self._cursor(), text, consume)
 
     def _guarded(self, cursor: Cursor, query: str, consume: Any) -> Any:
-        """Run execute+consume, cancelling server-side if it overruns.
+        """Run execute+consume, canceling server-side if it overruns.
 
         Trino's ``execute`` returns once the first page is ready while the query
         keeps running, so the deadline has to cover consumption too — not just
@@ -223,7 +228,7 @@ class TrinoClient:
         if not wait([outcome], timeout=minutes * 60).done:
             query_id = self._cancel(cursor)
             raise QueryTimeout(
-                f"Query exceeded the {minutes:g}-minute timeout and was cancelled "
+                f"Query exceeded the {minutes:g}-minute timeout and was canceled "
                 f"(query_id={query_id or 'unknown'}). Narrow it with WHERE or LIMIT, "
                 "avoid SELECT * on large tables, or raise TRINO_QUERY_TIMEOUT_MINUTES."
             )
@@ -231,7 +236,7 @@ class TrinoClient:
 
     def _cancel(self, cursor: Cursor) -> str | None:
         query_id = getattr(cursor, "query_id", None)
-        log.warning("cancelling query %s after timeout", query_id or "unknown")
+        log.warning("canceling query %s after timeout", query_id or "unknown")
 
         try:
             cursor.cancel()
@@ -285,7 +290,7 @@ class TrinoClient:
             try:
                 cursor.cancel()
             except Exception:
-                log.debug("cancelling after truncation failed", exc_info=True)
+                log.debug("canceling after truncation failed", exc_info=True)
             log.warning("result truncated to %d rows (TRINO_MAX_ROWS)", cap)
 
         return QueryResult(columns=columns, rows=rows, truncated=truncated)
@@ -307,7 +312,6 @@ class TrinoClient:
                     written += len(batch)
             return written
 
-        # JSON: emit incrementally so a large result never sits in memory twice.
         with path.open("w", encoding="utf-8") as handle:
             handle.write("[")
             while batch := cursor.fetchmany(_FILE_BATCH):

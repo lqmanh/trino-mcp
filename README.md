@@ -10,7 +10,7 @@ An MCP server for querying [Trino](https://trino.io) from an AI agent harness.
   cut short carries `"truncated": true` so a partial answer is never mistaken for a
   complete one.
 - **Query timeouts.** Queries exceeding `TRINO_QUERY_TIMEOUT_MINUTES` are  
-  cancelled on the cluster, so they stop consuming resources rather than just being
+  canceled on the cluster, so they stop consuming resources rather than just being
   abandoned.
 - **File export.** Set `output_file_format` to `csv` or `json` and rows stream straight to
   disk — uncapped, never entering the conversation — ready for pandas or DuckDB. The model

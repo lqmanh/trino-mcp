@@ -85,7 +85,7 @@ used and anything that is not exactly one statement is rejected
 
 `mcp-trino` sidesteps the class by
 [refusing any query containing `;`](https://github.com/tuannvm/mcp-trino/blob/3e0be007e203057318a098c5b846ba881e8f427c/internal/trino/client.go#L206-L210),
-at the cost of rejecting a harmless trailing semicolon. This project does both: normalise
+at the cost of rejecting a harmless trailing semicolon. This project does both: normalize
 the trailing `;` away, then reject genuine multi-statement input.
 
 ### No read-only enforcement
@@ -180,7 +180,7 @@ Trade-offs, not corrections.
   so a brief outage does not stop the server starting. Connection errors surface per call
   instead of once, up front.
 - **No module-global mutable state.** `trino-mcp`
-  [initialises `config` and `client` to `None` at import](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/server.py#L24-L34)
+  [initializes `config` and `client` to `None` at import](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/server.py#L24-L34)
   and populates them in `main()`; this project passes the client into `create_server()`,
   so tests hand in a fake rather than patching module state.
 - **File export ignores the row cap.** Exporting exists to move a whole result set; rows

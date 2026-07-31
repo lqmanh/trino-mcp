@@ -8,7 +8,13 @@ import pytest
 from trino.exceptions import TrinoQueryError
 
 from trino_mcp import Config
-from trino_mcp.client import OutputFormat, QueryTimeout, qualify, quote_ident
+from trino_mcp.client import (
+    OutputFormat,
+    QueryRejected,
+    QueryTimeout,
+    qualify,
+    quote_ident,
+)
 
 from .conftest import FakeCursor, client_over
 
@@ -106,7 +112,7 @@ def test_truncation_is_reported_only_when_rows_were_dropped(
     assert result.rows == rows(kept)
     assert result.truncated is truncated
     # Streaming is stopped rather than left running for pages nobody reads.
-    assert cursor.cancelled is truncated
+    assert cursor.canceled is truncated
 
 
 def test_the_trailing_semicolon_is_stripped_before_execution(config: Config) -> None:
@@ -141,7 +147,7 @@ def test_writing_csv_ignores_the_cap_and_reports_the_count(
 def test_a_statement_with_no_result_set_writes_an_empty_file(
     config: Config, tmp_path: Path, fmt: OutputFormat, expected: str
 ) -> None:
-    """trino reports no columns for a query cancelled before they arrived.
+    """trino reports no columns for a query canceled before they arrived.
 
     Its annotation claims that cannot happen, so the guard reads as dead code
     and is easy to drop by accident — see `_column_names`.
@@ -239,7 +245,7 @@ def test_identifiers_cannot_escape_their_quotes(config: Config) -> None:
     assert cursor.executed == ['SHOW SCHEMAS FROM "a""; DROP TABLE x --"']
 
 
-def test_an_overrunning_query_is_cancelled_not_merely_abandoned(config: Config) -> None:
+def test_an_overrunning_query_is_canceled_not_merely_abandoned(config: Config) -> None:
     """Giving up locally would leave the query burning cluster resources."""
     cursor = SlowCursor(["n"], rows(1))
     # 0.01 minutes = 0.6s, well inside the cursor's 3s sleep. Kept small because
@@ -251,7 +257,7 @@ def test_an_overrunning_query_is_cancelled_not_merely_abandoned(config: Config) 
     with pytest.raises(QueryTimeout) as raised:
         client.execute("SELECT n")
 
-    assert cursor.cancelled is True
+    assert cursor.canceled is True
     assert "TRINO_QUERY_TIMEOUT_MINUTES" in str(raised.value)
 
 
@@ -267,25 +273,26 @@ def test_a_transport_failure_is_retried_on_a_fresh_connection(config: Config) ->
 
 
 @pytest.mark.parametrize(
-    ("error", "query"),
+    ("error", "query", "raised"),
     [
         # Trino understood it and said no; a retry would re-run a failure.
         (
             TrinoQueryError({"errorName": "SYNTAX_ERROR", "message": "nope"}, "q1"),
             "SELECT n",
+            QueryRejected,
         ),
         # A dropped socket is not evidence the write did not run — the cluster
         # keeps executing after the client goes away, so a retry can land twice.
-        (OSError("connection reset"), "INSERT INTO t VALUES (1)"),
+        (OSError("connection reset"), "INSERT INTO t VALUES (1)", OSError),
     ],
 )
 def test_statements_that_could_land_twice_are_not_retried(
-    config: Config, error: Exception, query: str
+    config: Config, error: Exception, query: str, raised: type[Exception]
 ) -> None:
     cursor = FailingCursor(["n"], rows(1), error)
     client = client_over(config, cursor)
 
-    with pytest.raises(type(error)):
+    with pytest.raises(raised):
         client.execute(query)
 
     assert cursor.attempts == 1
