@@ -24,14 +24,15 @@ An MCP server for querying [Trino](https://trino.io) from an AI agent harness.
 
 ## Tools
 
-| Tool             | Description                                               |
-| ---------------- | --------------------------------------------------------- |
-| `list_catalogs`  | List the catalogs available on the cluster                |
-| `list_schemas`   | List the schemas in a catalog                             |
-| `list_tables`    | List the tables and views in a schema                     |
-| `describe_table` | Show a table's columns, types, and comments               |
-| `execute_query`  | Run a SQL query, returning rows or writing them to a file |
-| `explain_query`  | Show how Trino would execute a query, without running it  |
+| Tool             | Description                                                   |
+| ---------------- | ------------------------------------------------------------- |
+| `list_catalogs`  | List the catalogs in the cluster                              |
+| `list_schemas`   | List the schemas in a catalog, optionally filtered by pattern |
+| `list_tables`    | List the tables and views in a schema, likewise filterable    |
+| `search_columns` | Find which tables contain a column matching a pattern         |
+| `describe_table` | Show a table's columns, types, and comments                   |
+| `execute_query`  | Run a SQL query, returning rows or writing them to a file     |
+| `explain_query`  | Show how Trino would execute a query, without running it      |
 
 ## Configuration
 

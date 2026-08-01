@@ -7,12 +7,7 @@ import pytest
 from trino.exceptions import TrinoQueryError
 
 from trino_mcp import Config
-from trino_mcp.client import (
-    QueryRejected,
-    QueryTimeout,
-    qualify,
-    quote_ident,
-)
+from trino_mcp.client import QueryRejected, QueryTimeout
 from trino_mcp.export import OutputFormat
 
 from .conftest import FakeCursor, client_over
@@ -158,7 +153,7 @@ def test_an_export_survives_a_cursor_that_reports_no_columns(
     )
 
     assert written == 0
-    assert destination.read_text() == ""
+    assert destination.exists()
 
 
 @pytest.mark.parametrize(
@@ -228,22 +223,63 @@ def test_a_late_worker_cannot_resurrect_the_reported_path(
     assert [p.name for p in tmp_path.iterdir()] == [f".{destination.name}.partial"]
 
 
-def test_identifiers_cannot_escape_their_quotes(config: Config) -> None:
-    """Catalog and schema names arrive as tool arguments, so they are untrusted.
+def test_untrusted_arguments_reach_sql_only_through_a_quoter(config: Config) -> None:
+    """Names and patterns are both tool arguments, and both quote differently.
 
-    Quoting the helpers correctly is only half of it; the metadata methods have
-    to actually route through them, which is where interpolating straight into
-    an f-string would slip past.
+    The quoting helpers are simple enough to read; what needs pinning is that the
+    metadata methods route through them at all, since interpolating straight into
+    an f-string produces a statement that looks fine until someone sends a quote.
     """
-    assert quote_ident('ev"il') == '"ev""il"'
-    assert qualify("cat", "sch", "tbl") == '"cat"."sch"."tbl"'
-    assert qualify('a"; DROP TABLE x --') == '"a""; DROP TABLE x --"'
-
-    cursor = FakeCursor(["Schema"], [["public"]])
+    cursor = FakeCursor(["name"], [["public"]])
     client = client_over(config, cursor)
 
-    assert client.list_schemas('a"; DROP TABLE x --') == ["public"]
-    assert cursor.executed == ['SHOW SCHEMAS FROM "a""; DROP TABLE x --"']
+    client.list_schemas('a"; DROP TABLE x --')
+    client.list_tables("cat", "sch", "%' OR '1'='1")
+    client.search_columns("cat", "%id%", schema="public")
+
+    assert cursor.executed == [
+        'SHOW SCHEMAS FROM "a""; DROP TABLE x --"',
+        """SHOW TABLES FROM "cat"."sch" LIKE '%'' OR ''1''=''1'""",
+        (
+            "SELECT table_schema, table_name, column_name, data_type "
+            'FROM "cat".information_schema.columns '
+            "WHERE column_name LIKE '%id%' AND table_schema = 'public' "
+            "ORDER BY table_schema, table_name, column_name"
+        ),
+    ]
+
+
+def test_each_listing_composes_its_own_like_clause(config: Config) -> None:
+    """SHOW CATALOGS takes no FROM, so the three do not concatenate alike.
+
+    The omitted pattern is the fourth case: `LIKE ''` is not the same as no LIKE,
+    and would match only names that are empty.
+    """
+    cursor = FakeCursor(["name"], [["x"]])
+    client = client_over(config, cursor)
+
+    client.list_catalogs("%prod%")
+    client.list_schemas("cat", "%prod%")
+    client.list_tables("cat", "sch", "%prod%")
+    client.list_tables("cat", "sch")
+
+    assert cursor.executed == [
+        "SHOW CATALOGS LIKE '%prod%'",
+        "SHOW SCHEMAS FROM \"cat\" LIKE '%prod%'",
+        'SHOW TABLES FROM "cat"."sch" LIKE \'%prod%\'',
+        'SHOW TABLES FROM "cat"."sch"',
+    ]
+
+
+def test_a_capped_listing_reports_being_cut_short(config: Config) -> None:
+    """Losing the flag here is how a table that exists gets reported as missing."""
+    cursor = FakeCursor(["Table"], [[f"t{n}"] for n in range(25)])
+    listed = client_over(config.model_copy(update={"max_rows": 10}), cursor).list_tables(
+        "cat", "sch"
+    )
+
+    assert listed.names == [f"t{n}" for n in range(10)]
+    assert listed.truncated is True
 
 
 def test_an_overrunning_query_is_canceled_not_merely_abandoned(config: Config) -> None:

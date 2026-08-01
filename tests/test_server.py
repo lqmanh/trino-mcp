@@ -5,7 +5,7 @@ import pytest
 from mcp import Client
 
 from trino_mcp import Config
-from trino_mcp.client import QueryResult
+from trino_mcp.client import Names, QueryResult
 
 from .conftest import payload, serving, texts
 
@@ -15,6 +15,7 @@ TOOLS = {
     "list_catalogs",
     "list_schemas",
     "list_tables",
+    "search_columns",
     "describe_table",
     "execute_query",
     "explain_query",
@@ -58,10 +59,7 @@ async def test_writes_are_gated_on_allow_writes(
         assert "TRINO_ALLOW_WRITES" in texts(outcome)[0]
 
 
-@pytest.mark.parametrize("fmt", ["csv", "json"])
-async def test_the_server_names_the_export_file(
-    config: Config, tmp_path: Path, fmt: str
-) -> None:
+async def test_the_server_names_the_export_file(config: Config, tmp_path: Path) -> None:
     """The model supplies a format and nothing else.
 
     Asserting the shape rather than a fixed name keeps real randomness and a
@@ -71,7 +69,7 @@ async def test_the_server_names_the_export_file(
     exporting = config.model_copy(update={"output_dir": tmp_path})
     async with serving(exporting, execute_to_file=7) as client:
         outcome = await client.call_tool(
-            "execute_query", {"sql": "SELECT 1", "output_file_format": fmt}
+            "execute_query", {"sql": "SELECT 1", "output_file_format": "parquet"}
         )
 
     assert not outcome.is_error
@@ -83,7 +81,7 @@ async def test_the_server_names_the_export_file(
     assert written.parent == tmp_path.resolve()
     # coolname's three-slot pattern can include a joining token, so the word
     # count is not fixed: "rainbow-turtle-of-holiness".
-    assert re.fullmatch(rf"\d{{8}}T\d{{6}}(-[a-z]+)+\.{fmt}", written.name)
+    assert re.fullmatch(r"\d{8}T\d{6}(-[a-z]+)+\.parquet", written.name)
 
 
 async def test_the_output_directory_is_created_on_demand(
@@ -118,6 +116,56 @@ async def test_describe_table_maps_columns(config: Config) -> None:
             {"name": "id", "type": "bigint", "extra": "", "comment": "the key"},
             {"name": "name", "type": "varchar(25)", "extra": "", "comment": ""},
         ],
+    }
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_a_listing_carries_its_truncation_flag(
+    config: Config, truncated: bool
+) -> None:
+    """Every listing is capped, so every listing has to be able to admit it."""
+    async with serving(config, list_tables=Names(["orders", "returns"], truncated)) as (
+        client
+    ):
+        result = await client.call_tool(
+            "list_tables", {"catalog": "cat", "schema": "sch"}
+        )
+
+    assert result.structured_content == {
+        "tables": ["orders", "returns"],
+        "truncated": truncated,
+    }
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_search_matches_carry_a_qualified_name(
+    config: Config, truncated: bool
+) -> None:
+    """The catalog is an argument, not a result column, so the tool re-attaches it.
+
+    Returning a bare table name would leave the model to guess the catalog it
+    just supplied. The flag matters as much: a truncated search that reads as
+    complete says the column exists nowhere else.
+    """
+    found = QueryResult(
+        columns=["table_schema", "table_name", "column_name", "data_type"],
+        rows=[["public", "houses", "house_location_id", "varchar"]],
+        truncated=truncated,
+    )
+    async with serving(config, execute=found) as client:
+        result = await client.call_tool(
+            "search_columns", {"catalog": "iceberg", "pattern": "%location%"}
+        )
+
+    assert result.structured_content == {
+        "matches": [
+            {
+                "table": "iceberg.public.houses",
+                "column": "house_location_id",
+                "type": "varchar",
+            }
+        ],
+        "truncated": truncated,
     }
 
 

@@ -20,24 +20,83 @@ from .sql import is_read_only
 
 log = logging.getLogger(__name__)
 
-# The src layout means this module is importable only when the distribution is
-# installed, so the metadata lookup cannot fail at runtime. Defined here rather
-# than in __init__ because that would import this module back.
+# The src layout means this module is importable only when the distribution is installed,
+# so the metadata lookup cannot fail at runtime.
 __version__ = version("trino-mcp")
 
-PlanFormat = Literal["LOGICAL", "DISTRIBUTED", "IO", "VALIDATE"]
+PlanFormat = Annotated[
+    Literal["LOGICAL", "DISTRIBUTED", "IO", "VALIDATE"],
+    Field(
+        description=(
+            "Which plan to return: LOGICAL for the shape of the query, "
+            "DISTRIBUTED to see stage boundaries and data movement, IO "
+            "for the tables and partitions it would read, VALIDATE to "
+            "only check that the statement is valid."
+        )
+    ),
+]
+
+Pattern = Annotated[
+    str,
+    Field(
+        description=(
+            "SQL LIKE pattern to filter names by; % is the wildcard, so "
+            "use %foo% for a substring match and foo for an exact one. "
+            "Omit to list everything."
+        )
+    ),
+]
+
+Truncated = Annotated[
+    bool,
+    Field(
+        description=(
+            "True when the row cap cut this listing short, so names you are "
+            "looking for may be missing. Narrow it with `pattern` rather than "
+            "concluding they do not exist."
+        )
+    ),
+]
+
+QualifiedTable = Annotated[
+    str, Field(description="Fully qualified catalog.schema.table.")
+]
 
 
 class Catalogs(BaseModel):
     catalogs: Annotated[list[str], Field(description="Catalog names.")]
+    truncated: Truncated
 
 
 class Schemas(BaseModel):
     schemas: Annotated[list[str], Field(description="Schema names in the catalog.")]
+    truncated: Truncated
 
 
 class Tables(BaseModel):
     tables: Annotated[list[str], Field(description="Table and view names in the schema.")]
+    truncated: Truncated
+
+
+class ColumnMatch(BaseModel):
+    table: QualifiedTable
+    column: Annotated[str, Field(description="Name of the matching column.")]
+    type: Annotated[str, Field(description="Trino type of the matching column.")]
+
+
+class ColumnMatches(BaseModel):
+    matches: Annotated[
+        list[ColumnMatch], Field(description="Matches, ordered by schema then table.")
+    ]
+    truncated: Annotated[
+        bool,
+        Field(
+            description=(
+                "True when the row cap cut the search short, so tables holding "
+                "the column may be missing. Narrow the pattern or pass a schema."
+            )
+        ),
+    ]
 
 
 class Column(BaseModel):
@@ -48,7 +107,7 @@ class Column(BaseModel):
 
 
 class TableDescription(BaseModel):
-    table: Annotated[str, Field(description="Fully qualified table name.")]
+    table: QualifiedTable
     columns: Annotated[list[Column], Field(description="Columns in declaration order.")]
 
 
@@ -139,28 +198,74 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
     output_root = config.output_dir.expanduser().resolve()
 
     @server.tool()
-    async def list_catalogs() -> Catalogs:
-        """List the catalogs available on the Trino cluster.
+    async def list_catalogs(pattern: Pattern = "") -> Catalogs:
+        """List the catalogs in the Trino cluster.
 
         Each catalog is a connector to a distinct data source. Start here when
         exploring an unfamiliar cluster.
         """
-        return Catalogs(catalogs=await call(client.list_catalogs))
+        listed = await call(client.list_catalogs, pattern)
+        return Catalogs(catalogs=listed.names, truncated=listed.truncated)
 
     @server.tool()
     async def list_schemas(
         catalog: Annotated[str, Field(description="Catalog to list schemas from.")],
+        pattern: Pattern = "",
     ) -> Schemas:
         """List the schemas in a catalog."""
-        return Schemas(schemas=await call(client.list_schemas, catalog))
+        listed = await call(client.list_schemas, catalog, pattern)
+        return Schemas(schemas=listed.names, truncated=listed.truncated)
 
     @server.tool()
     async def list_tables(
         catalog: Annotated[str, Field(description="Catalog containing the schema.")],
         schema: Annotated[str, Field(description="Schema to list tables from.")],
+        pattern: Pattern = "",
     ) -> Tables:
         """List the tables and views in a schema."""
-        return Tables(tables=await call(client.list_tables, catalog, schema))
+        listed = await call(client.list_tables, catalog, schema, pattern)
+        return Tables(tables=listed.names, truncated=listed.truncated)
+
+    @server.tool()
+    async def search_columns(
+        catalog: Annotated[str, Field(description="Catalog to search.")],
+        pattern: Annotated[
+            str,
+            Field(
+                description=(
+                    "SQL LIKE pattern matched against column names; % is the wildcard, "
+                    "so use %foo% for a substring match and foo for an exact one."
+                )
+            ),
+        ],
+        schema: Annotated[
+            str,
+            Field(
+                description=(
+                    "Optional schema to restrict the search to. Worth passing "
+                    "whenever you know it: it is much faster on a large catalog."
+                )
+            ),
+        ] = "",
+    ) -> ColumnMatches:
+        """Find which tables contain a column matching a pattern.
+
+        Use this when you know roughly what a column is called but not which
+        table holds it — searching for a join key across an unfamiliar catalog,
+        or locating the table behind a metric.
+        """
+        result: QueryResult = await call(client.search_columns, catalog, pattern, schema)
+        return ColumnMatches(
+            matches=[
+                ColumnMatch(
+                    table=f"{catalog}.{row[0]}.{row[1]}",
+                    column=str(row[2]),
+                    type=str(row[3]),
+                )
+                for row in result.rows
+            ],
+            truncated=result.truncated,
+        )
 
     @server.tool()
     async def describe_table(
@@ -274,17 +379,7 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
     @server.tool()
     async def explain_query(
         sql: Annotated[str, Field(description="The SQL statement to explain.")],
-        plan_format: Annotated[
-            PlanFormat,
-            Field(
-                description=(
-                    "Which plan to return: LOGICAL for the shape of the query, "
-                    "DISTRIBUTED to see stage boundaries and data movement, IO "
-                    "for the tables and partitions it would read, VALIDATE to "
-                    "only check that the statement is valid."
-                )
-            ),
-        ] = "LOGICAL",
+        plan_format: PlanFormat = "LOGICAL",
     ) -> Plan:
         """Show how Trino would execute a query, without running it.
 

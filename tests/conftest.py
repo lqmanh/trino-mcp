@@ -14,6 +14,7 @@ from mcp import Client
 from mcp.types import CallToolResult
 
 from trino_mcp import Config, TrinoClient, create_server
+from trino_mcp.client import Names
 from trino_mcp.export import OutputFormat
 
 
@@ -126,14 +127,19 @@ class FakeTrino(TrinoClient):
         path.write_text("")
         return self.results.get("execute_to_file", 0)
 
-    def list_catalogs(self) -> list[str]:
-        return self.results.get("list_catalogs", [])
+    def _listing(self, key: str) -> Names:
+        """Accept either bare names or a `Names`, so a test opts into truncation."""
+        canned = self.results.get(key, [])
+        return canned if isinstance(canned, Names) else Names(canned, False)
 
-    def list_schemas(self, catalog: str) -> list[str]:
-        return self.results.get("list_schemas", [])
+    def list_catalogs(self, pattern: str = "") -> Names:
+        return self._listing("list_catalogs")
 
-    def list_tables(self, catalog: str, schema: str) -> list[str]:
-        return self.results.get("list_tables", [])
+    def list_schemas(self, catalog: str, pattern: str = "") -> Names:
+        return self._listing("list_schemas")
+
+    def list_tables(self, catalog: str, schema: str, pattern: str = "") -> Names:
+        return self._listing("list_tables")
 
     def describe_table(self, catalog: str, schema: str, table: str) -> Any:
         return self.results["describe_table"]

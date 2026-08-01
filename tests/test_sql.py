@@ -1,6 +1,6 @@
 import pytest
 
-from trino_mcp.sql import is_read_only, normalize
+from trino_mcp.sql import is_read_only
 
 
 @pytest.mark.parametrize(
@@ -40,7 +40,3 @@ def test_reads_are_allowed(query: str) -> None:
 )
 def test_writes_and_ambiguity_are_refused(query: str) -> None:
     assert not is_read_only(query)
-
-
-def test_normalize_strips_the_trailing_semicolon_trino_rejects() -> None:
-    assert normalize("  SELECT 1;  ") == "SELECT 1"

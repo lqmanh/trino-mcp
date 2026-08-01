@@ -88,10 +88,15 @@ Fakes live in `conftest.py`, one per layer: `Rows` is a bare `export.Batches`,
 the behavior — `FakeTrino` replaces the client wholesale, so a test written against it
 proves nothing about `client.py`.
 
-Tests cover behavior this project owns. Pydantic's constraint handling, sqlglot's parser,
-and library defaults are not re-tested, and cases that exercise a branch another test
-already covers get folded in rather than added. When claiming a test guards something,
-verify it by mutating the source and watching it fail.
+Test what could plausibly break, not everything that could be asserted. A test earns its
+place by catching a regression that would not otherwise be obvious — a boundary, a race, a
+library quirk, a silently wrong answer. Self-evident logic does not need one: a utility
+helper is verified by reading it, and a test restating it cannot fail by accident.
+Third-party library behavior is not re-tested either. A case exercising a branch another
+test already covers gets folded in rather than added.
+
+When claiming a test guards something, verify it by mutating the source and watching it
+fail.
 
 ## Conventions
 

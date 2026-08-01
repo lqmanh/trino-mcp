@@ -28,11 +28,13 @@ class QueryRejected(Exception):
 
 
 @dataclass(frozen=True, slots=True)
-class QueryResult:
-    """Not a pydantic model on purpose: it carries every row of every query, and
-    validating them would cost real time to prove something already known.
-    """
+class Names:
+    names: list[str]
+    truncated: bool
 
+
+@dataclass(frozen=True, slots=True)
+class QueryResult:
     # Rows stay in the list-of-lists shape the Trino DB-API hands back, so they
     # reach json.dumps without a per-row rebuild.
     columns: list[str]
@@ -54,6 +56,16 @@ def quote_ident(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def quote_literal(value: str) -> str:
+    """Quote a Trino string literal so it cannot terminate the surrounding statement.
+
+    The sibling of ``quote_ident`` for tool arguments that are values rather than
+    names: a LIKE pattern reaches a statement by the same route a catalog name
+    does, and closing the quote would end it just as effectively.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
 def qualify(*parts: str) -> str:
     if not parts or not all(parts):
         raise ValueError(
@@ -61,6 +73,10 @@ def qualify(*parts: str) -> str:
             "an empty one would silently address a different object"
         )
     return ".".join(quote_ident(part) for part in parts)
+
+
+def _like(pattern: str) -> str:
+    return f" LIKE {quote_literal(pattern)}" if pattern else ""
 
 
 def _description(cursor: Cursor) -> list[ColumnDescription]:
@@ -314,17 +330,28 @@ class TrinoClient:
 
     # -- metadata --------------------------------------------------------------
 
-    def _names(self, query: str) -> list[str]:
-        return [row[0] for row in self.execute(query).rows]
+    def _names(self, query: str) -> Names:
+        result = self.execute(query)
+        return Names([row[0] for row in result.rows], result.truncated)
 
-    def list_catalogs(self) -> list[str]:
-        return self._names("SHOW CATALOGS")
+    def list_catalogs(self, pattern: str = "") -> Names:
+        return self._names(f"SHOW CATALOGS{_like(pattern)}")
 
-    def list_schemas(self, catalog: str) -> list[str]:
-        return self._names(f"SHOW SCHEMAS FROM {qualify(catalog)}")
+    def list_schemas(self, catalog: str, pattern: str = "") -> Names:
+        return self._names(f"SHOW SCHEMAS FROM {qualify(catalog)}{_like(pattern)}")
 
-    def list_tables(self, catalog: str, schema: str) -> list[str]:
-        return self._names(f"SHOW TABLES FROM {qualify(catalog, schema)}")
+    def list_tables(self, catalog: str, schema: str, pattern: str = "") -> Names:
+        return self._names(f"SHOW TABLES FROM {qualify(catalog, schema)}{_like(pattern)}")
+
+    def search_columns(self, catalog: str, pattern: str, schema: str = "") -> QueryResult:
+        where = f"column_name LIKE {quote_literal(pattern)}"
+        if schema:
+            where += f" AND table_schema = {quote_literal(schema)}"
+        return self.execute(
+            "SELECT table_schema, table_name, column_name, data_type "
+            f"FROM {qualify(catalog)}.information_schema.columns "
+            f"WHERE {where} ORDER BY table_schema, table_name, column_name"
+        )
 
     def describe_table(self, catalog: str, schema: str, table: str) -> QueryResult:
         return self.execute(f"DESCRIBE {qualify(catalog, schema, table)}")

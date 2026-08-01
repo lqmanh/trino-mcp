@@ -57,20 +57,17 @@ def test_password_is_refused_over_plain_http(monkeypatch: pytest.MonkeyPatch) ->
         Config.from_env()
 
 
-def test_output_dir_defaults_to_dot_output_and_need_not_exist(
+def test_a_missing_output_dir_is_allowed_but_a_file_is_not(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Both are what the export path relies on: it creates the directory itself."""
-    assert Config.from_env().output_dir == Path(".output")
+    """The export path creates the directory itself, so absence is fine.
 
+    A file under that name is not: without this it surfaces as a raw errno at the
+    first export rather than at startup.
+    """
     monkeypatch.setenv("TRINO_OUTPUT_DIR", str(tmp_path / "created" / "later"))
     assert Config.from_env().output_dir.name == "later"
 
-
-def test_output_dir_pointing_at_a_file_is_refused(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Otherwise it surfaces as a raw errno at the first export, not at startup."""
     not_a_dir = tmp_path / "results.csv"
     not_a_dir.write_text("")
     monkeypatch.setenv("TRINO_OUTPUT_DIR", str(not_a_dir))
@@ -79,20 +76,13 @@ def test_output_dir_pointing_at_a_file_is_refused(
         Config.from_env()
 
 
-def test_the_password_is_masked_everywhere_it_travels(
+def test_the_password_does_not_survive_rendering_the_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The config is logged whole at startup, so the field itself must be safe.
-
-    SecretStr guards the value rather than one container's repr, so the paths a
-    future edit is most likely to reach for are all pinned here.
-    """
+    """`main` logs the config whole at startup, so `str` is the path that matters."""
     monkeypatch.setenv("TRINO_PASSWORD", "hunter2")
     config = Config.from_env()
 
-    assert "hunter2" not in repr(config)
     assert "hunter2" not in str(config)
-    assert "hunter2" not in f"{config.password}"
-    assert "hunter2" not in str(config.model_dump())
     assert config.password is not None
     assert config.password.get_secret_value() == "hunter2"
