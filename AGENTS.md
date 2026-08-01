@@ -1,14 +1,11 @@
 # Agent Guidelines
 
-This file provides guidance to AI agent harnesses when working with code in this
-repository.
-
 ## Commands
 
 ```bash
-uv sync                                              # install, including dev group
-uv run pytest                                        # full suite
-uv run pytest tests/test_client.py -k truncation     # one file / one pattern
+uv sync                                            # install, including dev group
+uv run pytest                                      # full suite
+uv run pytest tests/test_client.py -k truncation   # one file / one pattern
 uv run pytest "tests/test_sql.py::test_reads_are_allowed[SHOW CATALOGS]"
 uv run ruff check && uv run ruff format --check && uv run ty check
 npx prettier --write .
@@ -32,94 +29,64 @@ specific error text.
 
 ## Architecture
 
-Four modules, layered bottom-up, each importing only from those below it:
+Five modules, layered bottom-up, each importing only from those below it:
 
-| Module      | Role                                                              |
-| ----------- | ----------------------------------------------------------------- |
-| `config.py` | Frozen pydantic `Config`, built once by `from_env()` at startup   |
-| `sql.py`    | `is_read_only()` — sqlglot AST guard; `normalize()`               |
-| `client.py` | Blocking Trino access: caps, deadlines, cancellation, file export |
-| `server.py` | MCP tool definitions, `create_server()`, `main()`                 |
+| Module      | Role                                                            |
+| ----------- | --------------------------------------------------------------- |
+| `config.py` | Frozen pydantic `Config`, built once by `from_env()` at startup |
+| `sql.py`    | `is_read_only()` — sqlglot AST guard; `normalize()`             |
+| `export.py` | Rows to csv/json/parquet on disk; owns `OutputFormat`           |
+| `client.py` | Blocking Trino access: caps, deadlines, cancellation            |
+| `server.py` | MCP tool definitions, `create_server()`, `main()`               |
 
-`__init__.py` is a facade: it re-exports the public names and nothing else. `__version__`
-is defined in `server.py` and re-exported from there, not the reverse — the package root
-importing a submodule that imports back is the cycle this layout avoids.
+`export.py` imports nothing from this package. It owns Trino _type_ semantics — the
+sqlglot dialect, and the Python shape each type arrives in — while `client.py` owns Trino
+_cursor_ semantics. Its `Batches` protocol asks only for `fetchmany`, which is what keeps
+`description` and its py.typed inaccuracies on the client side.
+
+`__init__.py` is a facade. `__version__` is defined in `server.py` and re-exported from
+there, not the reverse — the package root importing a submodule that imports back is the
+cycle this layout avoids.
 
 **`create_server(client, config)` takes the client as an argument.** There is no
 module-level mutable state, which is what lets every server test hand in a fake instead of
 patching globals. Keep it that way.
 
-**The client is synchronous; the server is async.** Tools call the inner `call()` helper,
-which runs the blocking method via `anyio.to_thread.run_sync` and converts any exception
-into a `ToolError`. Client code must never become async.
+**The client is synchronous; the server is asynchronous.** Tools reach it through the
+inner `call()` helper. Client code must never become async.
 
-**The connection is lazy.** `TrinoClient._connect()` fires on first tool use, not at
-startup, so the process starts and answers `list_tools` while the cluster is down.
+**The connection is lazy**, so the process starts and answers `list_tools` while the
+cluster is down.
 
-### Invariants worth knowing before editing
+### Boundaries
 
-- **Read-only guard.** `sql.py` uses `sqlglot.parse()` and rejects anything that is not
-  exactly one statement — `parse_one()` would silently inspect only the first, letting
-  `SELECT 1; DROP TABLE t` through. Parse failure fails closed. This is a security
-  boundary; changes need a case in `test_sql.py`'s matrix.
-- **Identifier quoting.** Catalog/schema/table names arrive as tool arguments and are
-  untrusted. Every metadata query routes through `qualify()` / `quote_ident()`. An
-  f-string interpolating a name directly turns `list_tables` into arbitrary SQL execution.
-- **The row cap fetches `cap + 1`.** That extra row is the only way to distinguish
-  "exactly at the cap" from "there is more", which decides the `truncated` flag. A partial
-  result the model reads as complete is a correctness bug.
-- **The timeout deadline covers execute _and_ consume.** Trino's `execute` returns once
-  the first page is ready while the query keeps running. On expiry the query is canceled
-  server-side: `cursor.cancel()` no-ops while `_next_uri` is unset, so a
-  `DELETE /v1/query/{id}` fallback follows.
-- **Retry is transport-only, and read-only.** `TrinoQueryError` means the cluster
-  understood the statement and rejected it. A transport failure means less than it looks:
-  Trino keeps executing after the client socket drops, so a retried write can land twice.
-  `_attempt` re-runs a statement only when `is_read_only()` says repeating it is harmless
-  — note that this holds regardless of `TRINO_ALLOW_WRITES`, which is set in the harness
-  config and can change without anyone revisiting this code.
-- **The password must never reach a log line.** `Config.password` is a `SecretStr`, so it
-  masks in reprs, f-strings, and `model_dump()`, and reading it takes an explicit
-  `get_secret_value()` — that is why the whole config is safe to log. `SecretStr` does
-  **not** cover a `ValidationError`: pydantic reports the offending input, which here is
-  the raw environment dict, so `main()` formats config errors from
-  `exc.errors(include_input=False)`. Both halves are load-bearing; the mask is not a
-  reason to drop the second. A password is also refused over `TRINO_HTTP_SCHEME=http`,
-  because the trino client sends BasicAuthentication over plain http without objecting.
-- **The model never picks an output path.** `execute_query` takes `output_file_format`
-  (`csv`/`json`) and the server names the file `<timestamp>-<slug>.<ext>` under
-  `TRINO_OUTPUT_DIR`. An earlier revision took a model-supplied path and confined it to
-  that directory, which could not stop `output_file="README.md"` — the jail's own root
-  defaulted to the working tree. The format is also passed down to `_drain_to_file` rather
-  than sniffed from the suffix, so the extension always matches the bytes.
-- **Exports drain to `.<name>.partial` and are renamed only on success.** That name is the
-  reason a failed export leaves nothing: it is server-generated and never reaches the
-  caller on the error path, so nobody downstream could clean up an orphan. Unlinking the
-  temp also defuses the thread a timeout abandons — it writes on into a removed inode
-  instead of growing a file under the name the caller was told about.
-- **Logs go to stderr.** Under stdio transport stdout carries JSON-RPC framing; a stray
-  `print` desynchronises the client.
+`sql.py` decides what may run and `client.py` quotes every identifier that reaches a
+statement. Both are security boundaries: a change to the read-only guard needs a case in
+`test_sql.py`'s matrix, and a metadata query that interpolates a name instead of routing
+through `qualify()` turns a tool argument into arbitrary SQL.
 
-### MCP 2.0 specifics
+### Decisions that look wrong until you know why
 
-Python types are snake_case (`tool.input_schema`, `result.structured_content`,
-`result.is_error`) while the wire format stays camelCase. Returning a pydantic model from
-a tool auto-generates an output schema _and_ emits the payload twice — once as structured
-content, once as pretty-printed text. `execute_query` is therefore the one tool declared
-`@server.tool(structured_output=False)`, returning a `TextContent` of compact JSON,
-because its output is the unbounded one.
+- **Retry ignores `TRINO_ALLOW_WRITES`.** A statement is re-run after a transport failure
+  only when `is_read_only()` says repeating it is harmless, whatever the flag says — it
+  lives in harness config and can change without anyone revisiting this code.
+- **The model never picks an output path.** It chooses a format; the server names the file
+  under `TRINO_OUTPUT_DIR`. Confining a model-supplied path to that directory was tried
+  and could not stop `output_file="README.md"`, because the jail's own root defaulted to
+  the working tree.
+- **Logs go to stderr**, because stdout carries the JSON-RPC framing.
 
 ## Testing
 
 The suite runs offline; nothing reaches a cluster. `anyio` provides the async plugin
 (**not** `pytest-asyncio`) — async tests need `pytestmark = pytest.mark.anyio`.
 
-Fakes live in `conftest.py`. `StubbedClient` overrides `_connect()` rather than assigning
-`_connection`, so reconnection — and therefore the retry path — stays exercisable.
-`FakeTrino` supplies canned results to the server layer. `test_stdio.py` spawns the real
-console script; note that MCP clients forward only a fixed allowlist (`HOME`, `LOGNAME`,
-`PATH`, `SHELL`, `TERM`, `USER`) to a stdio server, so `TRINO_*` must be passed
-explicitly.
+Fakes live in `conftest.py`, one per layer: `Rows` is a bare `export.Batches`,
+`FakeCursor` stands in for the DB-API, `StubbedClient` dials it instead of a cluster
+(overriding `_connect()`, so reconnection and the retry path stay exercisable), and
+`FakeTrino` hands canned results to the server layer. Reach for the lowest one that covers
+the behavior — `FakeTrino` replaces the client wholesale, so a test written against it
+proves nothing about `client.py`.
 
 Tests cover behavior this project owns. Pydantic's constraint handling, sqlglot's parser,
 and library defaults are not re-tested, and cases that exercise a branch another test
@@ -129,6 +96,15 @@ verify it by mutating the source and watching it fail.
 ## Conventions
 
 - PEP 695 generics (`async def call[T](...)`) rather than `TypeVar`.
+- **Concision is the default, and it applies to everything** — comments, docstrings, copy,
+  commit messages, plans, and chat responses alike. Say it once, in the fewest words that
+  carry the whole meaning. Cut preamble, restatement, and hedging; if deleting a sentence
+  costs the reader nothing, it was not earning its place. Answer what was asked before
+  volunteering what was not.
+- **Keep implementation detail in the implementation.** A mechanism explained here is a
+  second copy that drifts the moment the code moves, and nothing fails when it does. This
+  file carries layering, constraints, and decisions; how a function achieves them belongs
+  in a comment beside it.
 - **Avoid unnecessary comments & docstrings.** Write one only when the code cannot speak
   for itself: a non-obvious _why_, an edge case, a library quirk, a decision that looks
   wrong until you know the reason. Several of the ones here encode findings that cost real
@@ -142,5 +118,3 @@ verify it by mutating the source and watching it fail.
 - **Declare every runtime import in `[project.dependencies]`**, including packages `mcp`
   already pulls in. No lockfile reaches users, so relying on a transitive dependency means
   relying on `mcp` never dropping it.
-- `docs/comparisons.md` cites three reference implementations via SHA-pinned GitHub
-  permalinks so they survive upstream code movement.

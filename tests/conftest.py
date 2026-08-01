@@ -14,7 +14,7 @@ from mcp import Client
 from mcp.types import CallToolResult
 
 from trino_mcp import Config, TrinoClient, create_server
-from trino_mcp.client import OutputFormat
+from trino_mcp.export import OutputFormat
 
 
 @pytest.fixture
@@ -29,13 +29,33 @@ def config() -> Config:
     return Config(host="trino.invalid", user="tester", catalog="cat", db_schema="sch")
 
 
-class FakeCursor:
-    """The slice of the DB-API cursor protocol the client actually uses."""
+class Rows:
+    """An `export.Batches`, which is the whole contract the writers depend on.
 
-    def __init__(self, columns: list[str], rows: list[list[Any]]) -> None:
-        self._columns = columns
+    Nothing in `export` may need more than this; if a test here has to grow a
+    `description`, that module has re-learned something belonging to the client.
+    """
+
+    def __init__(self, rows: list[list[Any]]) -> None:
         self._rows = rows
         self._offset = 0
+
+    def fetchmany(self, size: int) -> list[list[Any]]:
+        batch = self._rows[self._offset : self._offset + size]
+        self._offset += len(batch)
+        return batch
+
+
+class FakeCursor(Rows):
+    """`Rows` plus the slice of the DB-API cursor protocol the client uses.
+
+    Column types are left unset: only the Parquet export reads them, and it is
+    driven through `Rows` directly rather than through a cursor.
+    """
+
+    def __init__(self, columns: list[str], rows: list[list[Any]]) -> None:
+        super().__init__(rows)
+        self._columns = columns
         self.description: list[tuple[Any, ...]] | None = None
         self.executed: list[str] = []
         self.canceled = False
@@ -44,11 +64,6 @@ class FakeCursor:
     def execute(self, query: str) -> None:
         self.executed.append(query)
         self.description = [(name,) + (None,) * 6 for name in self._columns]
-
-    def fetchmany(self, size: int) -> list[list[Any]]:
-        batch = self._rows[self._offset : self._offset + size]
-        self._offset += len(batch)
-        return batch
 
     def fetchall(self) -> list[list[Any]]:
         batch = self._rows[self._offset :]

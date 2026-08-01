@@ -132,6 +132,17 @@ Here `TrinoQueryError` propagates immediately, and a transport failure is retrie
 read-only statements — a dropped socket is not evidence the statement did not run, since
 Trino keeps executing after the client goes away.
 
+### Export format taken from the file extension
+
+`trino-mcp`
+[derives the format from the path the model supplied](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/client.py#L249-L281):
+`.csv` writes CSV and, in its own words, `".json" (or any other extension)` writes JSON.
+So `output_file="results.parquet"` produces JSON under a `.parquet` name, and whatever
+opens it next fails on a file that looks right.
+
+Here the model picks a format and the server names the file, so the extension always
+follows the bytes.
+
 ### `Field()` as a parameter default
 
 `trino-mcp` writes
@@ -173,15 +184,13 @@ Capability these servers carry that this one does not need:
 
 Trade-offs, not corrections.
 
-- **Columnar results.** All three return row dicts, repeating column names on every row.
+- **Columnar results** — All three return row dicts, repeating column names on every row.
   This returns `{"columns": [...], "rows": [[...]]}` — cheaper on wide results, less
   self-describing. (`mcp-trino`'s docs show columnar output; its code returns row dicts.)
-- **Lazy connection.** The cluster is contacted on first tool use rather than at startup,
+- **Lazy connection** — The cluster is contacted on first tool use rather than at startup,
   so a brief outage does not stop the server starting. Connection errors surface per call
   instead of once, up front.
-- **No module-global mutable state.** `trino-mcp`
+- **No module-global mutable state** — `trino-mcp`
   [initializes `config` and `client` to `None` at import](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/server.py#L24-L34)
   and populates them in `main()`; this project passes the client into `create_server()`,
   so tests hand in a fake rather than patching module state.
-- **File export ignores the row cap.** Exporting exists to move a whole result set; rows
-  stream in batches instead.

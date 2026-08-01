@@ -13,8 +13,9 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, ValidationError
 
-from .client import OutputFormat, QueryRejected, QueryResult, QueryTimeout, TrinoClient
+from .client import QueryRejected, QueryResult, QueryTimeout, TrinoClient
 from .config import Config
+from .export import OutputFormat
 from .sql import is_read_only
 
 log = logging.getLogger(__name__)
@@ -213,10 +214,15 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
             OutputFormat | None,
             Field(
                 description=(
-                    "Set to csv or json to write the whole result set to a file on "
-                    "the server instead of returning rows. Only the path and a row "
-                    "count come back — use this for result sets too large to read. "
-                    "The server names the file; you cannot choose where it goes."
+                    "Write the whole result set to a file on the server instead of "
+                    "returning rows. Only the path and a row count come back — use "
+                    "this for result sets too large to read. Prefer parquet: it is "
+                    "the smallest, keeps each column's Trino type, and loads "
+                    "directly into DuckDB, pandas, or polars. Choose csv only when "
+                    "something downstream cannot read parquet, and json when the "
+                    "result has row, array, or map columns you need a text format "
+                    "to preserve. The server names the file; you cannot choose "
+                    "where it goes."
                 )
             ),
         ] = None,
