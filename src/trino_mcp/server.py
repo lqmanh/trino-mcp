@@ -13,7 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, ValidationError
 
-from .client import QueryRejected, QueryResult, QueryTimeout, TrinoClient
+from .client import Profile, QueryRejected, QueryResult, QueryTimeout, TrinoClient
 from .config import Config
 from .export import OutputFormat
 from .sql import is_read_only
@@ -51,9 +51,9 @@ Truncated = Annotated[
     bool,
     Field(
         description=(
-            "True when the row cap cut this listing short, so names you are "
-            "looking for may be missing. Narrow it with `pattern` rather than "
-            "concluding they do not exist."
+            "True when the row cap cut this result short, so what you are "
+            "looking for may be missing. Narrow the pattern rather than "
+            "concluding it does not exist."
         )
     ),
 ]
@@ -61,6 +61,20 @@ Truncated = Annotated[
 QualifiedTable = Annotated[
     str, Field(description="Fully qualified catalog.schema.table.")
 ]
+
+TableName = Annotated[
+    str,
+    Field(
+        description=(
+            "Table name. A qualified 'catalog.schema.table' is accepted, "
+            "but passing the parts separately is preferred."
+        )
+    ),
+]
+
+CatalogPart = Annotated[str, Field(description="Catalog, if not in `table`.")]
+
+SchemaPart = Annotated[str, Field(description="Schema, if not in `table`.")]
 
 
 class Catalogs(BaseModel):
@@ -88,15 +102,7 @@ class ColumnMatches(BaseModel):
     matches: Annotated[
         list[ColumnMatch], Field(description="Matches, ordered by schema then table.")
     ]
-    truncated: Annotated[
-        bool,
-        Field(
-            description=(
-                "True when the row cap cut the search short, so tables holding "
-                "the column may be missing. Narrow the pattern or pass a schema."
-            )
-        ),
-    ]
+    truncated: Truncated
 
 
 class Column(BaseModel):
@@ -109,6 +115,94 @@ class Column(BaseModel):
 class TableDescription(BaseModel):
     table: QualifiedTable
     columns: Annotated[list[Column], Field(description="Columns in declaration order.")]
+
+
+class ColumnProfile(BaseModel):
+    name: Annotated[str, Field(description="Column name.")]
+    nulls_fraction: Annotated[
+        float | None,
+        Field(description="Share of rows that are NULL, 0 to 1. Null when uncollected."),
+    ]
+    distinct_values: Annotated[
+        int | None,
+        Field(
+            description="Estimated distinct values. Null means never collected, not zero."
+        ),
+    ]
+    low: Annotated[str | None, Field(description="Smallest value, if known.")]
+    high: Annotated[str | None, Field(description="Largest value, if known.")]
+
+
+class TableProfile(BaseModel):
+    table: QualifiedTable
+    comment: Annotated[
+        str,
+        Field(
+            description=(
+                "The table's own comment, empty when unset. `describe_table` returns "
+                "comments on columns only."
+            )
+        ),
+    ]
+    connector: Annotated[
+        str,
+        Field(
+            description=(
+                "Connector backing the catalog — iceberg, hive, postgresql,... Says "
+                "whether this is a lakehouse table or a live operational database."
+            )
+        ),
+    ]
+    row_count: Annotated[
+        int | None, Field(description="Estimated rows. Null when never collected.")
+    ]
+    partition_columns: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Columns to filter on to prune partitions — the cheapest win on a "
+                "large table. Empty means unpartitioned, or the layout was unreadable."
+            )
+        ),
+    ]
+    partition_spec: Annotated[
+        list[str],
+        Field(
+            description=(
+                "The transforms behind those columns. Partitioning is often hidden: "
+                "month(created_at) creates no month column, and filtering to one day "
+                "still reads the whole month."
+            )
+        ),
+    ]
+    last_written: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Last write time, from Iceberg or Delta Lake history. Null on other "
+                "connectors, which says nothing about the table. History is pruned, "
+                "so this is freshness, not an audit trail."
+            )
+        ),
+    ]
+    columns: Annotated[
+        list[ColumnProfile],
+        Field(
+            description=(
+                "Per-column statistics. Only columns with a known statistic appear; "
+                "call `describe_table` for the full column list."
+            )
+        ),
+    ]
+    notes: Annotated[
+        list[str],
+        Field(
+            description=(
+                "What could not be gathered, and why. Read this before concluding "
+                "something is absent rather than unavailable."
+            )
+        ),
+    ]
 
 
 class Plan(BaseModel):
@@ -162,11 +256,7 @@ def _generate_filename(fmt: OutputFormat) -> str:
 
 
 def create_server(client: TrinoClient, config: Config) -> MCPServer:
-    """Build the MCP server around an already-constructed client.
-
-    Taking the client as an argument rather than reaching for module state is
-    what lets the tests drive every tool against a fake.
-    """
+    """Build the MCP server around an already-constructed client."""
     server = MCPServer(
         name="trino-mcp",
         version=__version__,
@@ -269,30 +359,13 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
 
     @server.tool()
     async def describe_table(
-        table: Annotated[
-            str,
-            Field(
-                description=(
-                    "Table name. A qualified 'catalog.schema.table' is accepted, "
-                    "but passing the parts separately is preferred."
-                )
-            ),
-        ],
-        catalog: Annotated[str, Field(description="Catalog, if not in `table`.")] = "",
-        schema: Annotated[str, Field(description="Schema, if not in `table`.")] = "",
+        table: TableName, catalog: CatalogPart = "", schema: SchemaPart = ""
     ) -> TableDescription:
         """Show a table's columns, types, and comments.
 
-        Call this before writing a query against an unfamiliar table.
-
-        Two things this does not return are worth a follow-up `execute_query`
-        against the fully qualified name:
-        - `SHOW STATS FOR <catalog.schema.table>` — row count, distinct values,
-          null fractions, and data size. Check these before a query that could
-          hit the row cap or the timeout.
-        - `SHOW CREATE TABLE <catalog.schema.table>` — partitioning, file
-          format, and location. Filtering on a partition column is the main
-          thing that keeps a large table cheap to query.
+        Call this before writing a query against an unfamiliar table. It returns
+        the column list and nothing else; for row counts, null fractions,
+        freshness, and which column to filter on, call `profile_table`.
         """
         cat, sch, tbl = resolve_target(table, catalog, schema)
         result: QueryResult = await call(client.describe_table, cat, sch, tbl)
@@ -309,6 +382,42 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
             ],
         )
 
+    @server.tool()
+    async def profile_table(
+        table: TableName, catalog: CatalogPart = "", schema: SchemaPart = ""
+    ) -> TableProfile:
+        """Report how big a table is, how it is laid out, and how fresh it is.
+
+        Reach for this before querying an unfamiliar table, or any query whose
+        cost you cannot predict: `partition_columns` is what keeps a large table
+        cheap, and a table can look unpartitioned until you ask.
+
+        Slower than `describe_table`. Whatever a connector will not answer is
+        left out and explained in `notes` rather than failing the call.
+        """
+        cat, sch, tbl = resolve_target(table, catalog, schema)
+        profile: Profile = await call(client.profile_table, cat, sch, tbl)
+        return TableProfile(
+            table=f"{cat}.{sch}.{tbl}",
+            comment=profile.comment,
+            connector=profile.connector,
+            row_count=profile.row_count,
+            partition_columns=profile.partition_columns,
+            partition_spec=profile.partition_spec,
+            last_written=profile.last_written,
+            columns=[
+                ColumnProfile(
+                    name=stats.name,
+                    nulls_fraction=stats.nulls_fraction,
+                    distinct_values=stats.distinct_values,
+                    low=stats.low,
+                    high=stats.high,
+                )
+                for stats in profile.columns
+            ],
+            notes=profile.notes,
+        )
+
     # structured_output=False keeps the payload from being emitted twice (once as
     # structured content, once as pretty-printed text) and lets the JSON go out
     # with compact separators — this is the one tool whose output is unbounded.
@@ -319,31 +428,27 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
             OutputFormat | None,
             Field(
                 description=(
-                    "Write the whole result set to a file on the server instead of "
-                    "returning rows. Only the path and a row count come back — use "
-                    "this for result sets too large to read. Prefer parquet: it is "
-                    "the smallest, keeps each column's Trino type, and loads "
-                    "directly into DuckDB, pandas, or polars. Choose csv only when "
-                    "something downstream cannot read parquet, and json when the "
-                    "result has row, array, or map columns you need a text format "
-                    "to preserve. The server names the file; you cannot choose "
-                    "where it goes."
+                    "Write the whole result set to a file instead of returning "
+                    "rows; only the path and a row count come back. Use it for "
+                    "results too large to read. Prefer parquet — smallest, keeps "
+                    "each column's Trino type, loads straight into DuckDB, pandas, "
+                    "or polars. Use csv only when something downstream cannot read "
+                    "parquet, and json when row, array, or map columns need a text "
+                    "format. The server names the file."
                 )
             ),
         ] = None,
     ) -> TextContent:
         """Run a SQL query and return the rows.
 
-        Results come back columnar: {"columns": [...], "rows": [[...]], ...}.
-        A "truncated": true field means the row cap cut the result short and you
+        Results are columnar: {"columns": [...], "rows": [[...]], ...}. A
+        "truncated": true field means the row cap cut the result short and you
         are seeing a partial answer.
 
-        Pass output_file_format to send the full result to a file instead; the
-        reply is then {"path": ..., "rows_written": N} and the rows never enter
-        this conversation. Read the file yourself if you need its contents.
+        With output_file_format the reply is {"path": ..., "rows_written": N}
+        instead, and the rows never enter this conversation.
 
-        Read-only by default; write statements are rejected unless the server was
-        started with TRINO_ALLOW_WRITES=true.
+        Read-only unless the server was started with TRINO_ALLOW_WRITES=true.
         """
         if not config.allow_writes and not is_read_only(sql):
             raise ToolError(

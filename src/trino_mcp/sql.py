@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Iterable
 
 import sqlglot
 from sqlglot import expressions as exp
@@ -28,6 +29,10 @@ _WRITE_TYPES = (
 # SHOW and EXPLAIN parse to a generic Command node rather than a dedicated type,
 # so they need a name check rather than an isinstance check.
 _READ_ONLY_COMMANDS = frozenset({"SHOW", "EXPLAIN"})
+
+# Iceberg's table property. Hive and Delta spell theirs `partitioned_by`, which
+# sqlglot gives a dedicated node; this one arrives as a generic Property.
+_PARTITIONING_PROPERTY = "partitioning"
 
 
 def normalize(query: str) -> str:
@@ -79,3 +84,67 @@ def is_read_only(query: str) -> bool:
         return not (head == "EXPLAIN" and "ANALYZE" in text.upper().split())
 
     return not any(isinstance(node, _WRITE_TYPES) for node in statement.walk())
+
+
+def partition_spec(ddl: str) -> list[str]:
+    """The partition transforms in a ``SHOW CREATE TABLE`` statement, verbatim.
+
+    Whichever property a connector spells them under, the value is an array of
+    strings, and they come back unparsed on purpose: ``month(created_at)`` tells
+    a reader that a day-level filter still scans a whole month, which the source
+    column alone does not.
+    """
+    try:
+        tree = sqlglot.parse_one(ddl, read="trino")
+    except Exception:  # noqa: BLE001 - an unreadable DDL is a missing section, not a failure
+        log.warning("could not parse SHOW CREATE TABLE output")
+        return []
+
+    arrays = [prop.this for prop in tree.find_all(exp.PartitionedByProperty)]
+    arrays += [
+        prop.args["value"]
+        for prop in tree.find_all(exp.Property)
+        if prop.name == _PARTITIONING_PROPERTY and "value" in prop.args
+    ]
+    return [
+        item.name
+        for array in arrays
+        if isinstance(array, exp.Array)
+        for item in array.expressions
+    ]
+
+
+def table_comment(ddl: str) -> str:
+    """The table's ``COMMENT``, read from a ``SHOW CREATE TABLE`` statement.
+
+    ``DESCRIBE`` returns the comment on each *column* and never the one on the
+    table, so this is the only place a table's own description surfaces.
+    """
+    try:
+        tree = sqlglot.parse_one(ddl, read="trino")
+    except Exception:  # noqa: BLE001 - an unreadable DDL is a missing section, not a failure
+        log.warning("could not parse SHOW CREATE TABLE output")
+        return ""
+    return next((prop.name for prop in tree.find_all(exp.SchemaCommentProperty)), "")
+
+
+def partition_source_columns(specs: Iterable[str]) -> list[str]:
+    """The columns a ``WHERE`` clause has to name to prune those partitions.
+
+    Partitioning is hidden: ``month(created_at)`` creates no
+    ``created_at_month`` column, so the transform is unusable as a filter and
+    the source column is what prunes.
+
+    Repeats are dropped — two transforms over one column are one column.
+    """
+    columns: list[str] = []
+    for spec in specs:
+        try:
+            node = sqlglot.parse_one(spec, read="trino")
+        except Exception:  # noqa: BLE001 - one unreadable transform must not lose the rest
+            log.warning("could not parse partition transform %r", spec)
+            continue
+        for column in node.find_all(exp.Column):
+            if column.name not in columns:
+                columns.append(column.name)
+    return columns

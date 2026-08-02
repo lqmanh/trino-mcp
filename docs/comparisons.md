@@ -11,165 +11,35 @@ pinned to the commit that was read, so they keep resolving to the code described
 - **[weijie-tan3/trino-mcp](https://github.com/weijie-tan3/trino-mcp)** (Python) — closest
   in spirit to this one.
 
-## At a glance
-
-|                    | mcp-trino                                   | mcp-trino-python | trino-mcp                   | **this**              |
-| ------------------ | ------------------------------------------- | ---------------- | --------------------------- | --------------------- |
-| Language           | Go                                          | Python           | Python                      | Python                |
-| Tools              | 6                                           | 22               | 8                           | 6                     |
-| Read-only guard    | regex + keywords                            | none             | sqlglot AST                 | sqlglot AST           |
-| Row limit          | yes, + truncated flag                       | no               | no                          | yes, + truncated flag |
-| Query timeout      | context deadline                            | no               | yes, cancels                | yes, cancels          |
-| Identifier quoting | no                                          | no               | no                          | **yes**               |
-| Result shape       | row dicts                                   | row dicts        | row dicts                   | **columnar**          |
-| File export        | no                                          | no               | yes                         | yes                   |
-| Auth               | password, OAuth2, JWT, Azure, impersonation | password         | password, OAuth2, Azure SPN | password              |
-| Transport          | stdio, HTTP, SSE                            | stdio, HTTP, SSE | stdio                       | stdio                 |
-
-`mcp-trino` is solving a materially larger problem than this project does — multi-tenant,
-deployed, SSO — and ships a CLI, a REPL, and Helm charts alongside the server. Most of
-what is "missing" here is on purpose, and would be a regression in its context.
-
-## Ideas that shaped this design
-
-### Row cap with truncation signal
-
-`mcp-trino`
-[stops iterating at a configured limit](https://github.com/tuannvm/mcp-trino/blob/3e0be007e203057318a098c5b846ba881e8f427c/internal/trino/client.go#L379-L437),
-closes the rows to end server-side streaming, and reports `Truncated: true` alongside the
-results. Neither Python implementation caps at all — both
-[`fetchall()`](https://github.com/alaturqua/mcp-trino-python/blob/ea1300e228f8a95eea38c9804487614bbf7e78a4/src/trino_client.py#L77-L84)
-unbounded.
-
-### sqlglot AST read-only detection
-
-`trino-mcp`
-[checks statements with sqlglot](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/utils.py#L42-L89)
-and inspects the syntax tree. It is the right call: keyword matching has to special-case
-every read-only statement containing a write keyword (`SHOW CREATE TABLE`).
-
-### Query timeout with server-side cancellation
-
-`trino-mcp`'s
-[timeout handling](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/client.py#L117-L214)
-covers a subtlety: `cursor.cancel()` does nothing while `_next_uri` is unset — the state
-of a query still in its opening request, which is exactly when a timeout fires. A direct
-`DELETE /v1/query/{id}` is the reliable path.
-
-### Output file
-
-`trino-mcp` offers
-[an output path on its query tool](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/server.py#L325-L367),
-returning a row count only, keeping large result sets out of the context.
-
-### `explain_query` tool
-
-Only `mcp-trino` has one. Cheap to provide, and it lets a model check an expensive query
-before running it.
-
-## Edge cases these implementations surfaced
-
-### Multi-statement bypass in `parse_one`
-
-`trino-mcp`'s guard calls
-[`sqlglot.parse_one()`](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/utils.py#L57-L63),
-which returns the first statement and discards the rest, so only the first is inspected:
-
-```sql
-SELECT * FROM t; DROP TABLE t   -- reads as read-only
-```
-
-Found while building a case matrix for this project's own guard. Here `sqlglot.parse()` is
-used and anything that is not exactly one statement is rejected
-([`src/trino_mcp/sql.py`](../src/trino_mcp/sql.py)), with a regression test.
-
-`mcp-trino` sidesteps the class by
-[refusing any query containing `;`](https://github.com/tuannvm/mcp-trino/blob/3e0be007e203057318a098c5b846ba881e8f427c/internal/trino/client.go#L206-L210),
-at the cost of rejecting a harmless trailing semicolon. This project does both: normalize
-the trailing `;` away, then reject genuine multi-statement input.
-
-### No read-only enforcement
-
-`mcp-trino-python` does not attempt it. Its
-[`execute_query`](https://github.com/alaturqua/mcp-trino-python/blob/ea1300e228f8a95eea38c9804487614bbf7e78a4/src/trino_client.py#L67-L84)
-runs whatever it is given, and `optimize` and `expire_snapshots` are exposed
-unconditionally — consistent with a table-maintenance server rather than an analytics one.
-Worth knowing before pointing it at production.
-
-### Unquoted identifiers
-
-All three interpolate tool arguments straight into metadata queries, e.g.
-[`f"SHOW SCHEMAS FROM {catalog}"`](https://github.com/alaturqua/mcp-trino-python/blob/ea1300e228f8a95eea38c9804487614bbf7e78a4/src/trino_client.py#L109-L127).
-Catalog, schema, and table names come from the model, so a metadata tool can run arbitrary
-SQL, bypassing whatever guard sits on the query tool.
-
-This project quotes every identifier and doubles embedded quotes
-([`src/trino_mcp/client.py`](../src/trino_mcp/client.py)), with a test asserting
-`a"; DROP TABLE x --` cannot escape.
-
-### Password auth over plain HTTP
-
-Two of the three default `http_scheme` to `http` and attach basic auth anyway.
-`mcp-trino-python`
-[builds `BasicAuthentication` whenever `TRINO_PASSWORD` is set](https://github.com/alaturqua/mcp-trino-python/blob/ea1300e228f8a95eea38c9804487614bbf7e78a4/src/config.py#L28-L39),
-and `trino-mcp`'s
-[`PASSWORD` branch — its default `AUTH_METHOD` — never touches the scheme](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/config.py#L154-L167),
-which only the OAuth2 and Azure paths raise to `https`. `mcp-trino` defaults to `https`.
-
-Nothing downstream catches it: the trino client attaches the credential base64-encoded and
-sends it without complaint. Trino refuses password auth without TLS, but by then the
-password has crossed the network. This project rejects the pairing at startup.
-
-### Retry scope on non-idempotent statements
-
-`trino-mcp`
-[catches bare `Exception`](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/client.py#L100-L110)
-around `cursor.execute()` and retries once on a fresh connection, treating a
-`TrinoQueryError` — the cluster understood the statement and rejected it — the same as a
-dropped socket. A failing write can run twice.
-
-Here `TrinoQueryError` propagates immediately, and a transport failure is retried only for
-read-only statements — a dropped socket is not evidence the statement did not run, since
-Trino keeps executing after the client goes away.
-
-### Export format taken from the file extension
-
-`trino-mcp`
-[derives the format from the path the model supplied](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/client.py#L249-L281):
-`.csv` writes CSV and, in its own words, `".json" (or any other extension)` writes JSON.
-So `output_file="results.parquet"` produces JSON under a `.parquet` name, and whatever
-opens it next fails on a file that looks right.
-
-Here the model picks a format and the server names the file, so the extension always
-follows the bytes.
-
-### `Field()` as a parameter default
-
-`trino-mcp` writes
-[`catalog: str = Field(description=...)`](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/server.py#L291-L300).
-FastMCP's introspection handles it, but the `FieldInfo` object is the runtime default, so
-calling the function directly hands it an object where a string is expected.
-`Annotated[str, Field(...)]` is used here instead.
-
-### Top-level module namespace
-
-`mcp-trino-python` ships
-[`packages = ["src"]` with `mcp-trino = "server:main"`](https://github.com/alaturqua/mcp-trino-python/blob/ea1300e228f8a95eea38c9804487614bbf7e78a4/pyproject.toml),
-installing `server`, `config`, and `trino_client` as top-level modules, where another
-distribution claiming those names would collide. Its modules also import each other flatly
-(`from config import TrinoConfig`), so it is not importable as a library.
+|                    | mcp-trino                                   | mcp-trino-python | trino-mcp                   | **this**         |
+| ------------------ | ------------------------------------------- | ---------------- | --------------------------- | ---------------- |
+| Language           | Go                                          | Python           | Python                      | Python           |
+| Tools              | 6                                           | 22               | 8                           | 8                |
+| Read-only guard    | regex + keywords                            | no               | sqlglot AST                 | sqlglot AST      |
+| Row cap            | yes                                         | no               | no                          | yes              |
+| Query timeout      | yes, cancels                                | no               | yes, cancels                | yes, cancels     |
+| Identifier quoting | no                                          | no               | no                          | **yes**          |
+| Result shape       | row dicts                                   | row dicts        | row dicts                   | **columnar**     |
+| File export        | no                                          | no               | yes                         | yes              |
+| Auth               | password, OAuth2, JWT, Azure, impersonation | password         | password, OAuth2, Azure SPN | password         |
+| Transport          | stdio, HTTP, SSE                            | stdio, HTTP, SSE | stdio                       | stdio            |
+| Runs as            | shared service, multi-user                  | local subprocess | local subprocess            | local subprocess |
+| Extras             | CLI, REPL, Helm chart                       | —                | —                           | —                |
 
 ## Scope left out on purpose
 
 Capability these servers carry that this one does not need:
 
-- **Iceberg maintenance tooling** (`optimize`, `optimize_manifests`, `expire_snapshots`,
-  `show_manifests`, `show_partitions`, `show_files`, `show_entries`, `show_refs`,
-  `show_metadata_log_entries`) — 15 of `mcp-trino-python`'s 22 tools.
-- **OAuth2 / JWT / Azure SPN / impersonation / allowlists** — for shared deployments;
-  unnecessary for a single user with password auth.
-- **HTTP and SSE transports, Helm charts, the CLI/REPL** — stdio only here.
-- **`show_catalog_tree`** — issues 1 + N + N×M queries to build one string.
+- **Table maintenance tools** — For write operations (`optimize`, `optimize_manifests`,
+  `expire_snapshots`), `execute_query` already runs them when `TRINO_ALLOW_WRITES=true`,
+  so a tool apiece would only shorten the name. It would also spread the write gate: today
+  `execute_query` is the single place that checks the flag, so each write tool added is
+  another one that has to remember. For read-only inspectors (`show_manifests`,
+  `show_partitions`, `show_files`, `show_entries`, `show_refs`,
+  `show_metadata_log_entries`), `profile_table` covers what they are usually reached for.
+- **OAuth2 / JWT / Azure SPN / impersonation / allowlists**
+- **HTTP and SSE transports, Helm charts, the CLI/REPL**
+- **`show_catalog_tree`** — This issues 1 + N + N×M queries to build one string.
 - **A CLI argument layer** — `trino-mcp` mirrors every environment variable as an argparse
   flag. Harnesses pass environment variables, and a password on a command line is visible
   in `ps`.
@@ -177,13 +47,20 @@ Capability these servers carry that this one does not need:
   [prepends a JSON comment to every statement](https://github.com/weijie-tan3/trino-mcp/blob/f32b6f564242b66b46813a91321c770e08c8fef5/src/trino_mcp/client.py#L54-L70)
   for attribution. The `source` connection parameter already lands in
   `system.runtime.queries.source`.
-- **Two query tools** — `trino-mcp` exposes both `execute_query` and
+- **Two separate tools for read and write** — `trino-mcp` exposes both `execute_query` and
   `execute_query_read_only`. One tool here, gated by `TRINO_ALLOW_WRITES`.
 
 ## Where this differs by choice
 
 Trade-offs, not corrections.
 
+- **One profile instead of a shelf of inspectors** — `mcp-trino-python` exposes each
+  metadata table as its own tool. `profile_table` reads what the connector supports in one
+  call and answers the question they exist to serve — which column prunes partitions, how
+  big, how fresh — rather than handing back `$manifests` for the model to interpret. A
+  connector with none of them still returns statistics plus a note saying what was
+  skipped. The cost is that raw metadata tables are only reachable through
+  `execute_query`.
 - **Columnar results** — All three return row dicts, repeating column names on every row.
   This returns `{"columns": [...], "rows": [[...]]}` — cheaper on wide results, less
   self-describing. (`mcp-trino`'s docs show columnar output; its code returns row dicts.)

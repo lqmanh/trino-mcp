@@ -5,7 +5,7 @@ import pytest
 from mcp import Client
 
 from trino_mcp import Config
-from trino_mcp.client import Names, QueryResult
+from trino_mcp.client import ColumnStats, Names, Profile, QueryResult
 
 from .conftest import payload, serving, texts
 
@@ -17,6 +17,7 @@ TOOLS = {
     "list_tables",
     "search_columns",
     "describe_table",
+    "profile_table",
     "execute_query",
     "explain_query",
 }
@@ -149,23 +150,65 @@ async def test_search_matches_carry_a_qualified_name(
     """
     found = QueryResult(
         columns=["table_schema", "table_name", "column_name", "data_type"],
-        rows=[["public", "houses", "house_location_id", "varchar"]],
+        rows=[["public", "orders", "customer_id", "varchar"]],
         truncated=truncated,
     )
     async with serving(config, execute=found) as client:
         result = await client.call_tool(
-            "search_columns", {"catalog": "iceberg", "pattern": "%location%"}
+            "search_columns", {"catalog": "iceberg", "pattern": "%customer%"}
         )
 
     assert result.structured_content == {
         "matches": [
             {
-                "table": "iceberg.public.houses",
-                "column": "house_location_id",
+                "table": "iceberg.public.orders",
+                "column": "customer_id",
                 "type": "varchar",
             }
         ],
         "truncated": truncated,
+    }
+
+
+PROFILE = Profile(
+    connector="hive",
+    comment="",
+    row_count=None,
+    partition_spec=["dt"],
+    partition_columns=["dt"],
+    last_written=None,
+    columns=[ColumnStats("dt", None, None, None, None)],
+    notes=["$snapshots: TrinoQueryError: TABLE_NOT_FOUND"],
+)
+
+
+async def test_a_partial_profile_reaches_the_model_intact(config: Config) -> None:
+    """An unknown statistic has to arrive as null, and the reason alongside it.
+
+    Coerce a stat on the way out, or drop `notes`, and an empty profile reads as
+    a fact about the table rather than an absence of information.
+    """
+    async with serving(config, profile_table=PROFILE) as client:
+        result = await client.call_tool("profile_table", {"table": "cat.sch.events"})
+
+    assert result.structured_content == {
+        "table": "cat.sch.events",
+        "comment": "",
+        "connector": "hive",
+        "row_count": None,
+        "partition_columns": ["dt"],
+        "partition_spec": ["dt"],
+        "last_written": None,
+        "columns": [
+            {
+                "name": "dt",
+                "nulls_fraction": None,
+                "distinct_values": None,
+                "low": None,
+                "high": None,
+            }
+        ],
+        "notes": ["$snapshots: TrinoQueryError: TABLE_NOT_FOUND"],
     }
 
 

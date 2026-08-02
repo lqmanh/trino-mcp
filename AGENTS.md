@@ -34,7 +34,7 @@ Five modules, layered bottom-up, each importing only from those below it:
 | Module      | Role                                                            |
 | ----------- | --------------------------------------------------------------- |
 | `config.py` | Frozen pydantic `Config`, built once by `from_env()` at startup |
-| `sql.py`    | `is_read_only()` — sqlglot AST guard; `normalize()`             |
+| `sql.py`    | sqlglot: the read-only guard, plus reading DDL                  |
 | `export.py` | Rows to csv/json/parquet on disk; owns `OutputFormat`           |
 | `client.py` | Blocking Trino access: caps, deadlines, cancellation            |
 | `server.py` | MCP tool definitions, `create_server()`, `main()`               |
@@ -65,6 +65,13 @@ statement. Both are security boundaries: a change to the read-only guard needs a
 `test_sql.py`'s matrix, and a metadata query that interpolates a name instead of routing
 through `qualify()` turns a tool argument into arbitrary SQL.
 
+The other line runs between Trino and whichever cluster is in front of it. **Branch on
+Trino-level facts, never on a deployment's conventions.** A connector name is registered
+by the plugin, so `iceberg` and `delta_lake` are the same strings on every cluster and
+special-casing one supports a standard. Retention windows, naming conventions — those are
+whoever set that cluster up, and they belong nowhere: not in a branch, not in a default,
+not in a docstring, not in a test fixture.
+
 ### Decisions that look wrong until you know why
 
 - **Retry ignores `TRINO_ALLOW_WRITES`.** A statement is re-run after a transport failure
@@ -91,9 +98,11 @@ proves nothing about `client.py`.
 Test what could plausibly break, not everything that could be asserted. A test earns its
 place by catching a regression that would not otherwise be obvious — a boundary, a race, a
 library quirk, a silently wrong answer. Self-evident logic does not need one: a utility
-helper is verified by reading it, and a test restating it cannot fail by accident.
-Third-party library behavior is not re-tested either. A case exercising a branch another
-test already covers gets folded in rather than added.
+helper is verified by reading it, and a test restating it cannot fail by accident. But
+"obvious by reading" is not the test; "obvious when wrong" is. A one-line mapping whose
+inversion still returns a plausible answer needs a case. A helper whose breakage is loud
+does not. Third-party library behavior is not re-tested either. A case exercising a branch
+another test already covers gets folded in rather than added.
 
 When claiming a test guards something, verify it by mutating the source and watching it
 fail.
@@ -118,8 +127,10 @@ fail.
 - **MCP-facing docstrings are the exception, because they are API.** A tool function's
   docstring becomes the tool description sent to the model, and `Field(description=...)`
   becomes its schema. Write those for the agent that consumes them: what the tool is for,
-  when to reach for it, what the response shape means. Length is justified there in a way
-  it is not elsewhere.
+  when to reach for it, what the response shape means. Length is justified where it
+  changes what the model does — but every word ships in the system prompt of every
+  session, so say each thing once. A lesson repeated in a docstring and two field
+  descriptions costs three times.
 - **Declare every runtime import in `[project.dependencies]`**, including packages `mcp`
   already pulls in. No lockfile reaches users, so relying on a transitive dependency means
   relying on `mcp` never dropping it.

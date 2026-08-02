@@ -2,26 +2,6 @@
 
 An MCP server for querying [Trino](https://trino.io) from an AI agent harness.
 
-## Features
-
-- **Read-only by default** — Every statement is parsed as Trino SQL and checked against
-  its syntax tree; writes are rejected unless `TRINO_ALLOW_WRITES=true`.
-- **Capped results** — Rows are limited to `TRINO_MAX_ROWS`, and a result cut short
-  carries `"truncated": true` so a partial answer is never mistaken for a complete one.
-- **Query timeouts** — Queries exceeding `TRINO_QUERY_TIMEOUT_MINUTES` are  
-  canceled on the cluster, so they stop consuming resources rather than just being
-  abandoned.
-- **File export** — Set `output_file_format` to `parquet`, `csv`, or `json` and rows
-  stream straight to disk — uncapped, never entering the conversation — ready for pandas,
-  polars, or DuckDB. Parquet keeps each column's Trino type, down to `decimal(38,10)` and
-  nested `row`/`array`/`map`. The model chooses the format; the server chooses the
-  filename, under `TRINO_OUTPUT_DIR`.
-- **Compact columnar results** — `{"columns": [...], "rows": [[...]]}`, so column names
-  aren't repeated on every row.
-- **Password authentication** — over HTTPS, with credentials read only from the
-  environment and never logged.
-- **Zero-install, stdio transport** — Runs via `uvx` and works with any local MCP client.
-
 ## Tools
 
 | Tool             | Description                                                   |
@@ -31,6 +11,7 @@ An MCP server for querying [Trino](https://trino.io) from an AI agent harness.
 | `list_tables`    | List the tables and views in a schema, likewise filterable    |
 | `search_columns` | Find which tables contain a column matching a pattern         |
 | `describe_table` | Show a table's columns, types, and comments                   |
+| `profile_table`  | Report a table's size, partitioning, freshness, and comment   |
 | `execute_query`  | Run a SQL query, returning rows or writing them to a file     |
 | `explain_query`  | Show how Trino would execute a query, without running it      |
 

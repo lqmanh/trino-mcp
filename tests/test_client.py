@@ -67,6 +67,67 @@ class LateCursor(FakeCursor):
         super().execute(query)
 
 
+class ScriptedCursor(FakeCursor):
+    """Answers each statement of a profile differently, keyed by a substring.
+
+    `FakeCursor` carries one result set, which the first statement would drain.
+    """
+
+    def __init__(self, script: dict[str, Any]) -> None:
+        super().__init__([], [])
+        self.script = script
+
+    def execute(self, query: str) -> None:
+        self.executed.append(query)
+        answer = next(
+            (value for key, value in self.script.items() if key in query), ([], [])
+        )
+        if isinstance(answer, Exception):
+            raise answer
+        self._columns, self._rows, self._offset = *answer, 0
+        self.description = [(name,) + (None,) * 6 for name in self._columns]
+
+
+STATS_COLUMNS = [
+    "column_name",
+    "data_size",
+    "distinct_values_count",
+    "nulls_fraction",
+    "row_count",
+    "low_value",
+    "high_value",
+]
+
+
+def profiling_script(connector: str = "iceberg") -> dict[str, Any]:
+    return {
+        "system.metadata.catalogs": (["connector_name"], [[connector]]),
+        "SHOW STATS": (
+            STATS_COLUMNS,
+            [
+                # There is no distinct count without ANALYZE, and Trino
+                # returns NULL for it rather than refusing the statement.
+                ["created_at", 1024.0, None, 0.0, None, "2026-01-01", "2026-07-01"],
+                ["note", None, None, None, None, None, None],
+                [None, None, None, None, 4200.0, None, None],
+            ],
+        ),
+        "SHOW CREATE TABLE": (
+            ["Create Table"],
+            [
+                [
+                    (
+                        "CREATE TABLE t (a int) COMMENT 'One row per order.' "
+                        "WITH (partitioning = ARRAY['month(created_at)'])"
+                    )
+                ]
+            ],
+        ),
+        "$snapshots": (["committed_at"], [["2026-08-01 10:00:00Z"]]),
+        "$history": (["timestamp"], [["2026-08-01 10:00:00Z"]]),
+    }
+
+
 class FailingCursor(FakeCursor):
     """Raises on the first execute, then behaves."""
 
@@ -280,6 +341,101 @@ def test_a_capped_listing_reports_being_cut_short(config: Config) -> None:
 
     assert listed.names == [f"t{n}" for n in range(10)]
     assert listed.truncated is True
+
+
+def test_a_profile_survives_a_section_that_fails(config: Config) -> None:
+    """The parts that answered must still come back.
+
+    Statistics can be refused by permissions, and raising would throw away the
+    two good parts for the sake of the bad one.
+    """
+    cursor = ScriptedCursor(profiling_script() | {"SHOW STATS": OSError("denied")})
+    profile = client_over(config, cursor).profile_table("cat", "sch", "orders")
+
+    assert profile.partition_columns == ["created_at"]
+    assert profile.comment == "One row per order."
+    assert profile.last_written == "2026-08-01 10:00:00Z"
+    assert profile.row_count is None
+    assert [note.split(":")[0] for note in profile.notes] == ["SHOW STATS"]
+    assert "denied" in profile.notes[0]
+
+
+@pytest.mark.parametrize(
+    ("connector", "history"),
+    [
+        (
+            "iceberg",
+            (
+                'SELECT "committed_at" FROM "cat"."sch"."orders$snapshots" '
+                'ORDER BY "committed_at" DESC LIMIT 1'
+            ),
+        ),
+        (
+            "delta_lake",
+            (
+                'SELECT "timestamp" FROM "cat"."sch"."orders$history" '
+                'ORDER BY "timestamp" DESC LIMIT 1'
+            ),
+        ),
+        # Anything else is left alone rather than probed and explained: a null
+        # last_written is not a claim about the table.
+        ("postgresql", None),
+    ],
+)
+def test_freshness_comes_from_the_connectors_own_history_table(
+    config: Config, connector: str, history: str | None
+) -> None:
+    """Each format names its history differently, and one name is reserved.
+
+    The suffix goes inside the identifier's quotes — `"orders$snapshots"`, not
+    `"orders"$snapshots` — which parses either way, so only the cluster objects.
+    Delta's column is literally `timestamp`, which Trino reads as the start of a
+    type literal unless quoted.
+    """
+    cursor = ScriptedCursor(profiling_script(connector))
+    profile = client_over(config, cursor).profile_table("cat", "sch", "orders")
+
+    if history is None:
+        assert profile.last_written is None
+        assert profile.notes == []
+        assert not any("orders$" in query for query in cursor.executed)
+    else:
+        assert history in cursor.executed
+        assert profile.last_written == "2026-08-01 10:00:00Z"
+
+
+def test_an_uncollected_statistic_stays_unknown(config: Config) -> None:
+    """Trino returns NULL rather than failing, and 0 is a different claim.
+
+    A distinct count exists only after ANALYZE; a 0 would say the column holds a
+    single value. A column with nothing known at all is dropped instead — on a
+    wide table those entries are the whole response and say nothing.
+    """
+    profile = client_over(config, ScriptedCursor(profiling_script())).profile_table(
+        "cat", "sch", "orders"
+    )
+
+    assert profile.row_count == 4200
+    assert [column.name for column in profile.columns] == ["created_at"]
+    assert profile.columns[0].distinct_values is None
+    assert profile.columns[0].nulls_fraction == 0.0
+    assert profile.columns[0].low == "2026-01-01"
+
+
+def test_a_profile_stops_after_the_first_timeout(config: Config) -> None:
+    """The deadline is per statement, so each part could spend it in turn.
+
+    The caller was promised one timeout, and a part that overran is evidence the
+    next will too.
+    """
+    profile = client_over(
+        config.model_copy(update={"query_timeout_minutes": 0.01}),
+        SlowCursor(["n"], rows(1)),
+    ).profile_table("cat", "sch", "orders")
+
+    assert "TRINO_QUERY_TIMEOUT_MINUTES" in profile.notes[0]
+    assert len(profile.notes) > 1
+    assert all("skipped" in note for note in profile.notes[1:])
 
 
 def test_an_overrunning_query_is_canceled_not_merely_abandoned(config: Config) -> None:

@@ -144,6 +144,9 @@ class FakeTrino(TrinoClient):
     def describe_table(self, catalog: str, schema: str, table: str) -> Any:
         return self.results["describe_table"]
 
+    def profile_table(self, catalog: str, schema: str, table: str) -> Any:
+        return self.results["profile_table"]
+
     def explain(self, query: str, plan_format: str) -> str:
         self.queries.append(f"EXPLAIN ({plan_format}) {query}")
         return self.results.get("explain", "")

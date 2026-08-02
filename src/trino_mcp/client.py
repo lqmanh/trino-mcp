@@ -1,6 +1,7 @@
 import logging
 import shutil
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future, wait
 from contextlib import suppress
 from dataclasses import dataclass
@@ -14,9 +15,21 @@ from trino.exceptions import TrinoQueryError
 from . import export
 from .config import Config
 from .export import OutputFormat
-from .sql import is_read_only, normalize
+from .sql import (
+    is_read_only,
+    normalize,
+    partition_source_columns,
+    partition_spec,
+    table_comment,
+)
 
 log = logging.getLogger(__name__)
+
+# Where each connector keeps its write history, and the column holding the timestamp.
+_HISTORY = {
+    "iceberg": ("$snapshots", "committed_at"),
+    "delta_lake": ("$history", "timestamp"),
+}
 
 
 class QueryTimeout(Exception):
@@ -46,6 +59,30 @@ class QueryResult:
         return len(self.rows)
 
 
+@dataclass(frozen=True, slots=True)
+class ColumnStats:
+    # Every field is optional because Trino reports an uncollected statistic as
+    # NULL rather than refusing. None has to survive to the model as "unknown";
+    # rendering it as 0 would claim a column has no distinct values.
+    name: str
+    nulls_fraction: float | None
+    distinct_values: int | None
+    low: str | None
+    high: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Profile:
+    connector: str
+    comment: str
+    row_count: int | None
+    partition_spec: list[str]
+    partition_columns: list[str]
+    last_written: str | None
+    columns: list[ColumnStats]
+    notes: list[str]
+
+
 def quote_ident(identifier: str) -> str:
     """Quote a Trino identifier so it cannot terminate the surrounding statement.
 
@@ -57,12 +94,7 @@ def quote_ident(identifier: str) -> str:
 
 
 def quote_literal(value: str) -> str:
-    """Quote a Trino string literal so it cannot terminate the surrounding statement.
-
-    The sibling of ``quote_ident`` for tool arguments that are values rather than
-    names: a LIKE pattern reaches a statement by the same route a catalog name
-    does, and closing the quote would end it just as effectively.
-    """
+    """The sibling of ``quote_ident``, for values rather than names."""
     return "'" + value.replace("'", "''") + "'"
 
 
@@ -79,8 +111,54 @@ def _like(pattern: str) -> str:
     return f" LIKE {quote_literal(pattern)}" if pattern else ""
 
 
+def _stats(result: QueryResult) -> tuple[int | None, list[ColumnStats]]:
+    """Split a SHOW STATS result into the table row count and the per-column rows.
+
+    The summary row is the one with a NULL ``column_name``, and it carries
+    ``row_count`` — which sits in the middle of the per-column statistics, so
+    reading these seven columns by offset invites picking up a neighbour.
+
+    Watch ``nulls_fraction``: the SQL reference page spells it
+    ``nulls_fractions``, the source does not, and a lookup that misses degrades
+    to "unknown" rather than failing — so the typo costs a debugging session.
+    """
+    index = {name: position for position, name in enumerate(result.columns)}
+
+    def value(row: list[Any], name: str) -> Any:
+        position = index.get(name)
+        return None if position is None else row[position]
+
+    row_count: int | None = None
+    columns: list[ColumnStats] = []
+    for row in result.rows:
+        name = value(row, "column_name")
+        if name is None:
+            total = value(row, "row_count")
+            row_count = None if total is None else int(total)
+            continue
+        nulls = value(row, "nulls_fraction")
+        distinct = value(row, "distinct_values_count")
+        low = value(row, "low_value")
+        high = value(row, "high_value")
+        # A column nothing is known about is dropped rather than reported as
+        # five nulls. On a wide table where no statistics were ever collected
+        # those entries are the whole response, and they say nothing.
+        if all(statistic is None for statistic in (nulls, distinct, low, high)):
+            continue
+        columns.append(
+            ColumnStats(
+                name=str(name),
+                nulls_fraction=None if nulls is None else float(nulls),
+                distinct_values=None if distinct is None else int(distinct),
+                low=None if low is None else str(low),
+                high=None if high is None else str(high),
+            )
+        )
+    return row_count, columns
+
+
 def _description(cursor: Cursor) -> list[ColumnDescription]:
-    """The current result set's columns, empty when there is not one.
+    """The current result set's columns, empty when unset.
 
     trino ships ``py.typed`` and declares ``description -> List[ColumnDescription]``,
     but returns None for a query that finished or was canceled before its columns
@@ -99,6 +177,7 @@ class TrinoClient:
     def __init__(self, config: Config) -> None:
         self._config = config
         self._connection: Connection | None = None
+        self._connectors: dict[str, str] = {}
 
     # -- connection management -------------------------------------------------
 
@@ -355,6 +434,85 @@ class TrinoClient:
 
     def describe_table(self, catalog: str, schema: str, table: str) -> QueryResult:
         return self.execute(f"DESCRIBE {qualify(catalog, schema, table)}")
+
+    def connector(self, catalog: str) -> str:
+        """Which connector backs a catalog, or "" when the cluster does not say.
+
+        Cached per catalog, since a stale answer would only change which
+        optional part of a profile is attempted.
+        """
+        if catalog not in self._connectors:
+            result = self.execute(
+                "SELECT connector_name FROM system.metadata.catalogs "
+                f"WHERE catalog_name = {quote_literal(catalog)}"
+            )
+            self._connectors[catalog] = str(result.rows[0][0]) if result.rows else ""
+        return self._connectors[catalog]
+
+    def profile_table(self, catalog: str, schema: str, table: str) -> Profile:
+        """Gather size, layout, and freshness, keeping whatever answers.
+
+        A profile missing one part is worth returning, so each part is attempted
+        separately and a failure becomes a note instead of an exception.
+
+        A timeout does stop the rest: the deadline applies per statement, and
+        letting each part spend it would multiply the promised wait.
+        """
+        target = qualify(catalog, schema, table)
+        notes: list[str] = []
+        expired = False
+
+        def section[T](label: str, fetch: Callable[[], T]) -> T | None:
+            nonlocal expired
+            if expired:
+                notes.append(f"{label}: skipped after the timeout above")
+                return None
+            try:
+                return fetch()
+            except QueryTimeout as exc:
+                expired = True
+                notes.append(f"{label}: {exc}")
+            except Exception as exc:
+                log.info("%s failed while profiling %s", label, target, exc_info=True)
+                notes.append(f"{label}: {type(exc).__name__}: {exc}")
+            return None
+
+        connector = section("connector", lambda: self.connector(catalog)) or ""
+
+        stats = section("SHOW STATS", lambda: self.execute(f"SHOW STATS FOR {target}"))
+        row_count, columns = _stats(stats) if stats else (None, [])
+
+        ddl = section(
+            "SHOW CREATE TABLE", lambda: self.execute(f"SHOW CREATE TABLE {target}")
+        )
+        created = str(ddl.rows[0][0]) if ddl and ddl.rows else ""
+        spec = partition_spec(created) if created else []
+
+        latest = None
+        if connector in _HISTORY:
+            suffix, column = _HISTORY[connector]
+            # The metadata suffix belongs inside the identifier's quotes:
+            # cat.sch."orders$snapshots". Quoted as a separate part it parses,
+            # and only the cluster objects.
+            history = qualify(catalog, schema, f"{table}{suffix}")
+            when = quote_ident(column)
+            latest = section(
+                suffix,
+                lambda: self.execute(
+                    f"SELECT {when} FROM {history} ORDER BY {when} DESC LIMIT 1"
+                ),
+            )
+
+        return Profile(
+            connector=connector,
+            comment=table_comment(created) if created else "",
+            row_count=row_count,
+            partition_spec=spec,
+            partition_columns=partition_source_columns(spec),
+            last_written=str(latest.rows[0][0]) if latest and latest.rows else None,
+            columns=columns,
+            notes=notes,
+        )
 
     def explain(self, query: str, plan_format: str) -> str:
         result = self.execute(f"EXPLAIN (TYPE {plan_format}) {normalize(query)}")
