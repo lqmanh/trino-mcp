@@ -1,0 +1,77 @@
+# A throwaway Trino for e2e tests and manual evaluation. No production data.
+#
+#   docker compose up -d          # manual use, reachable on localhost:8080
+#   uv run pytest -m e2e          # brings up its own copy under a separate project
+#
+# Tags are pinned on purpose: a Trino release can change how SHOW STATS or
+# SHOW CREATE TABLE render, which is exactly what the e2e tier exists to catch.
+
+name: trino-mcp
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  minio-init:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint:
+      - sh
+      - -c
+      - mc alias set fixture http://minio:9000 minio minio123 && mc mb --ignore-existing
+        fixture/warehouse
+
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:1.10.1
+    depends_on:
+      minio-init: { condition: service_completed_successfully }
+    environment:
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123
+      AWS_REGION: us-east-1
+
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: trino
+      POSTGRES_PASSWORD: trino
+      POSTGRES_DB: source
+    volumes:
+      - ./tests/e2e/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trino -d source"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  trino:
+    image: trinodb/trino:483
+    # 0 asks the kernel for a free port. The e2e fixture sets it so a test run
+    # can never collide with a real cluster; manual use gets 8080.
+    ports:
+      - "${TRINO_PORT:-8080}:8080"
+    volumes:
+      - ./tests/e2e/catalog:/etc/trino/catalog:ro
+    depends_on:
+      iceberg-rest: { condition: service_started }
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "trino", "--execute", "SELECT 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s

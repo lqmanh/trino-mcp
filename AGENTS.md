@@ -4,9 +4,10 @@
 
 ```bash
 uv sync                                            # install, including dev group
-uv run pytest                                      # full suite
+uv run pytest                                      # full suite, offline
 uv run pytest tests/test_client.py -k truncation   # one file / one pattern
 uv run pytest "tests/test_sql.py::test_reads_are_allowed[SHOW CATALOGS]"
+uv run pytest -m e2e                               # against a real Trino; needs docker
 uv run ruff check && uv run ruff format --check && uv run ty check
 npx prettier --write .
 ```
@@ -85,8 +86,16 @@ not in a docstring, not in a test fixture.
 
 ## Testing
 
-The suite runs offline; nothing reaches a cluster. `anyio` provides the async plugin
+The default run is offline; nothing reaches a cluster. `anyio` provides the async plugin
 (**not** `pytest-asyncio`) — async tests need `pytestmark = pytest.mark.anyio`.
+
+`tests/e2e/` is the exception, marked `e2e` and deselected by `addopts`. It exists for
+what a fake cannot check: every fake here was written from the same reading of the docs as
+the code it stands in for, so a misread survives the offline suite intact — the
+`SHOW STATS` column names and the `SHOW CREATE TABLE` rendering both reached it that way.
+Its fixture always builds a throwaway stack and never adopts a cluster that happens to be
+listening: a reachable port is not an identity check, and these tests seed tables.
+`docs/evaluation.md` covers the manual pass over the same stack.
 
 Fakes live in `conftest.py`, one per layer: `Rows` is a bare `export.Batches`,
 `FakeCursor` stands in for the DB-API, `StubbedClient` dials it instead of a cluster

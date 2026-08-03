@@ -120,6 +120,12 @@ uv run pytest
 uv run ruff check && uv run ruff format --check && uv run ty check
 ```
 
+`compose.yml` brings up a throwaway Trino — Iceberg over MinIO, a Postgres source, and
+`tpch` — so nothing needs a real cluster. `uv run pytest -m e2e` starts its own copy on a
+random port, seeds it, and tears it down; `docker compose up -d` gives you one on
+`localhost:8080` to keep. [docs/evaluation.md](docs/evaluation.md) uses it to check how
+well an agent actually drives the tools.
+
 When verifying local changes through `uvx`, pass `--no-cache` — uv will otherwise reuse a
 previously built wheel for the same version and you'll be testing stale code.
 

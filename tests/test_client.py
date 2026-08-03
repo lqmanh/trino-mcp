@@ -105,8 +105,8 @@ def profiling_script(connector: str = "iceberg") -> dict[str, Any]:
         "SHOW STATS": (
             STATS_COLUMNS,
             [
-                # There is no distinct count without ANALYZE, and Trino
-                # returns NULL for it rather than refusing the statement.
+                # Trino returns NULL for a statistic it does not have,
+                # rather than refusing the statement.
                 ["created_at", 1024.0, None, 0.0, None, "2026-01-01", "2026-07-01"],
                 ["note", None, None, None, None, None, None],
                 [None, None, None, None, 4200.0, None, None],
@@ -407,8 +407,9 @@ def test_freshness_comes_from_the_connectors_own_history_table(
 def test_an_uncollected_statistic_stays_unknown(config: Config) -> None:
     """Trino returns NULL rather than failing, and 0 is a different claim.
 
-    A distinct count exists only after ANALYZE; a 0 would say the column holds a
-    single value. A column with nothing known at all is dropped instead — on a
+    Which statistics exist varies by connector — Iceberg carries some in its
+    manifests — so NULL only ever means "unknown", where a 0 would say the
+    column holds a single value. A column with nothing known at all is dropped instead — on a
     wide table those entries are the whole response and say nothing.
     """
     profile = client_over(config, ScriptedCursor(profiling_script())).profile_table(
