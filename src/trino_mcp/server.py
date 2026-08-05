@@ -399,9 +399,6 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
             )
         return cat, sch, tbl
 
-    # Resolved once: config is frozen.
-    output_root = config.output_dir.expanduser().resolve()
-
     @server.tool()
     async def list_catalogs(pattern: Pattern = "") -> Catalogs:
         """List the catalogs in the Trino cluster.
@@ -414,7 +411,7 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
 
     @server.tool()
     async def list_schemas(
-        catalog: Annotated[str, Field(description="Catalog to list schemas from.")],
+        catalog: Annotated[str, Field(description="Exact catalog name.")],
         pattern: Pattern = "",
     ) -> Schemas:
         """List the schemas in a catalog."""
@@ -423,8 +420,8 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
 
     @server.tool()
     async def list_tables(
-        catalog: Annotated[str, Field(description="Catalog containing the schema.")],
-        schema: Annotated[str, Field(description="Schema to list tables from.")],
+        catalog: Annotated[str, Field(description="Exact catalog name.")],
+        schema: Annotated[str, Field(description="Exact schema name.")],
         pattern: Pattern = "",
     ) -> Tables:
         """List the tables and views in a schema."""
@@ -433,7 +430,7 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
 
     @server.tool()
     async def search_columns(
-        catalog: Annotated[str, Field(description="Catalog to search.")],
+        catalog: Annotated[str, Field(description="Exact catalog name.")],
         pattern: Annotated[
             str,
             Field(
@@ -447,17 +444,15 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
             str,
             Field(
                 description=(
-                    "Optional schema to restrict the search to. Worth passing "
-                    "whenever you know it: it is much faster on a large catalog."
+                    "Exact schema name, optional. Passing it restricts the search "
+                    "and is much faster on a large catalog."
                 )
             ),
         ] = "",
     ) -> ColumnMatches:
         """Find which tables contain a column matching a pattern.
 
-        Use this when you know roughly what a column is called but not which
-        table holds it — searching for a join key across an unfamiliar catalog,
-        or locating the table behind a metric.
+        Use this when you know roughly what a column is called but not which table holds it.
         """
         result: QueryResult = await call(client.search_columns, catalog, pattern, schema)
         return ColumnMatches(
@@ -574,8 +569,8 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
             )
 
         if output_file_format is not None:
-            await call(lambda: output_root.mkdir(parents=True, exist_ok=True))
-            destination = output_root / _generate_filename(output_file_format)
+            await call(lambda: config.output_dir.mkdir(parents=True, exist_ok=True))
+            destination = config.output_dir / _generate_filename(output_file_format)
             written = await call(
                 client.execute_to_file, sql, destination, output_file_format
             )

@@ -58,6 +58,11 @@ def test_password_is_refused_over_plain_http(monkeypatch: pytest.MonkeyPatch) ->
         Config.from_env()
 
 
+def test_default_output_dir_is_absolute() -> None:
+    """A relative default path is resolved so returned file paths are usable."""
+    assert Config.from_env().output_dir.is_absolute()
+
+
 def test_a_missing_output_dir_is_allowed_but_a_file_is_not(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -25,26 +25,26 @@ class Config(BaseModel):
     max_rows: int = Field(default=1000, ge=0)
     query_timeout_minutes: float = Field(default=5.0, ge=0)
     allow_writes: bool = False
-    output_dir: Path = Field(default=Path(".output"))
+    output_dir: Path = Field(default=Path(".output"), validate_default=True)
     manifest_path: Path | None = None
 
     @field_validator("output_dir")
     @classmethod
     def _refuse_non_directory_output_dir(cls, value: Path) -> Path:
-        expanded = value.expanduser()
-        if expanded.exists() and not expanded.is_dir():
-            raise ValueError(f"TRINO_OUTPUT_DIR is not a directory: {expanded}")
-        return value
+        resolved = value.expanduser().resolve()
+        if resolved.exists() and not resolved.is_dir():
+            raise ValueError(f"TRINO_OUTPUT_DIR is not a directory: {resolved}")
+        return resolved
 
     @field_validator("manifest_path")
     @classmethod
     def _refuse_missing_manifest(cls, value: Path | None) -> Path | None:
         if value is None:
             return None
-        expanded = value.expanduser()
-        if not expanded.is_file():
-            raise ValueError(f"TRINO_MANIFEST_PATH is not a file: {expanded}")
-        return value
+        resolved = value.expanduser().resolve()
+        if not resolved.is_file():
+            raise ValueError(f"TRINO_MANIFEST_PATH is not a file: {resolved}")
+        return resolved
 
     @model_validator(mode="after")
     def _refuse_cleartext_password(self) -> "Config":
