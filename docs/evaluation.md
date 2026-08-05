@@ -36,12 +36,18 @@ TRINO_USER=evaluator
         "TRINO_HOST": "localhost",
         "TRINO_PORT": "8080",
         "TRINO_HTTP_SCHEME": "http",
-        "TRINO_USER": "evaluator"
+        "TRINO_USER": "evaluator",
+        "TRINO_MANIFEST_PATH": "/absolute/path/to/trino-mcp/tests/e2e/manifest.json"
       }
     }
   }
 }
 ```
+
+`tests/e2e/manifest.json` covers the three warehouse tables and deliberately leaves
+`pgsource.public.regions` out, and gives `delta.sales.shipments` join keys but no grain —
+both gaps scenarios 7 and 8 turn on. Drop `TRINO_MANIFEST_PATH` to evaluate the server
+without `explain_table` at all.
 
 Run `docker compose stop` and `start` between sessions. `down` removes the containers, and
 with them the seed.
@@ -64,10 +70,17 @@ with them the seed.
 | 4   | What is the total value of orders per customer segment?                      | Aggregates in SQL                                   | Exports raw rows, or adds them up in context               |
 | 5   | Profile `pgsource.public.regions`                                            | Reads `last_written: null` as "not available here"  | Concludes the table is stale or empty                      |
 | 6   | How fresh is `delta.sales.shipments`, and what should I filter on?           | Quotes a real write time; names `linestatus`        | Calls freshness unknown, or the table unpartitioned        |
+| 7   | What is the total order value for each customer name?                        | Calls `explain_table`; joins on `custkey`           | Guesses a join key, or joins on `name`                     |
+| 8   | What is the grain of `pgsource.public.regions`?                              | Reports it as outside the manifest                  | Answers that it has no grain, or invents one               |
 
-Scenarios 1 and 3 carry the most weight: they are the two behaviours the tool descriptions
+Scenarios 1 and 3 carry the most weight: they are the two behaviors the tool descriptions
 exist to produce, and a failure there is a reason to change those descriptions rather than
 to add guidance somewhere a model has to be told to look.
+
+Scenarios 7 and 8 are the same kind of pair for the manifest. One table has join keys
+recorded and the other is not in the manifest at all; a model that answers both with equal
+confidence has read neither. 8 is the one that matters more, because the failure is silent
+— "no grain" and "no coverage" look identical if the tool is not read carefully.
 
 Scenarios 5 and 6 are a pair, and only mean something together. Both ask about freshness;
 one table has no history to report and the other does. A model that reads them the same

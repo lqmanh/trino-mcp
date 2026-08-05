@@ -14,7 +14,7 @@ pinned to the commit that was read, so they keep resolving to the code described
 |                    | mcp-trino                                   | mcp-trino-python | trino-mcp                   | **this**         |
 | ------------------ | ------------------------------------------- | ---------------- | --------------------------- | ---------------- |
 | Language           | Go                                          | Python           | Python                      | Python           |
-| Tools              | 6                                           | 22               | 8                           | 8                |
+| Tools              | 6                                           | 22               | 8                           | 8 (+1)           |
 | Read-only guard    | regex + keywords                            | no               | sqlglot AST                 | sqlglot AST      |
 | Row cap            | yes                                         | no               | no                          | yes              |
 | Query timeout      | yes, cancels                                | no               | yes, cancels                | yes, cancels     |
@@ -61,6 +61,12 @@ Trade-offs, not corrections.
   connector with none of them still returns statistics plus a note saying what was
   skipped. The cost is that raw metadata tables are only reachable through
   `execute_query`.
+- **A manifest none of them has** — All three answer only what the cluster can be asked.
+  Grain, join keys and provenance are not among those things: Iceberg has no keys and no
+  foreign keys, so on a lakehouse they do not exist to query at all. `explain_table`
+  serves them from a generated file, which buys facts nothing else can reach. The ninth
+  tool only exists when `TRINO_MANIFEST_PATH` is set, so the comparison above still holds
+  for a deployment without one.
 - **Columnar results** — All three return row dicts, repeating column names on every row.
   This returns `{"columns": [...], "rows": [[...]]}` — cheaper on wide results, less
   self-describing. (`mcp-trino`'s docs show columnar output; its code returns row dicts.)

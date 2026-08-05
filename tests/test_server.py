@@ -1,3 +1,4 @@
+import logging
 import re
 from pathlib import Path
 
@@ -7,7 +8,7 @@ from mcp import Client
 from trino_mcp import Config
 from trino_mcp.client import ColumnStats, Names, Profile, QueryResult
 
-from .conftest import payload, serving, texts
+from .conftest import payload, serving, texts, with_manifest
 
 pytestmark = pytest.mark.anyio
 
@@ -26,6 +27,79 @@ TOOLS = {
 async def test_the_expected_tools_are_exposed(connected: Client) -> None:
     listed = {tool.name for tool in (await connected.list_tools()).tools}
     assert listed == TOOLS
+
+
+async def test_explain_table_appears_only_with_a_manifest(
+    config: Config, tmp_path: Path
+) -> None:
+    """Its description ships in every session's system prompt, called or not.
+
+    The equality assertion above is the other half: no manifest, no tool, no cost.
+    """
+    async with serving(with_manifest(config, tmp_path / "m.json")) as client:
+        listed = {tool.name for tool in (await client.list_tools()).tools}
+
+    assert listed == TOOLS | {"explain_table"}
+
+
+async def test_an_empty_manifest_is_dropped_but_said_out_loud(
+    config: Config, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Covering nothing is a broken generator run, not a deployment choice.
+
+    Refusing to start would take the other tools down over an optional one, so
+    the tool goes unregistered — and that is invisible to whoever configured a
+    manifest unless the log says why.
+    """
+    empty = {"version": 1, "generated_at": "2026-08-05T00:00:00+00:00", "tables": {}}
+    with caplog.at_level(logging.WARNING):
+        async with serving(with_manifest(config, tmp_path / "m.json", empty)) as client:
+            listed = {tool.name for tool in (await client.list_tools()).tools}
+            instructions = client.instructions or ""
+
+    assert listed == TOOLS
+    assert "manifest covering" not in instructions
+    assert "covers no tables" in caplog.text
+
+
+async def test_explain_table_returns_the_facts_trino_cannot(
+    config: Config, tmp_path: Path
+) -> None:
+    """Every field here answers a question the cluster has no way to answer."""
+    async with serving(with_manifest(config, tmp_path / "m.json")) as client:
+        result = await client.call_tool("explain_table", {"table": "cat.sch.orders"})
+
+    assert result.structured_content == {
+        "table": "cat.sch.orders",
+        "known": True,
+        "generated_at": "2026-08-05T00:00:00+00:00",
+        "grain": ["id"],
+        "unique_keys": [["reference"]],
+        "replica_of": "pg_cat.public.orders",
+        "upstream": [],
+        "joins": [
+            {"columns": ["user_id"], "target": "cat.sch.users", "target_columns": ["id"]}
+        ],
+        "columns": [{"name": "payload", "note": "JSON held as varchar", "sources": []}],
+        "note": "",
+    }
+
+
+async def test_a_table_outside_the_manifest_says_so(
+    config: Config, tmp_path: Path
+) -> None:
+    """Empty fields alone would read as "this table has no grain".
+
+    Absence of coverage and absence of a grain are different answers, and only
+    one of them is a fact about the table.
+    """
+    async with serving(with_manifest(config, tmp_path / "m.json")) as client:
+        result = await client.call_tool("explain_table", {"table": "cat.sch.nowhere"})
+
+    assert result.structured_content is not None
+    assert result.structured_content["known"] is False
+    assert result.structured_content["grain"] == []
+    assert "missing coverage" in result.structured_content["note"]
 
 
 @pytest.mark.parametrize("truncated", [False, True])

@@ -166,6 +166,38 @@ async def connected(config: Config) -> AsyncGenerator[Client]:
         yield client
 
 
+MANIFEST: dict[str, Any] = {
+    "version": 1,
+    "generated_at": "2026-08-05T00:00:00+00:00",
+    "tables": {
+        "cat.sch.orders": {
+            "grain": ["id"],
+            "unique_keys": [["reference"]],
+            "replica_of": "pg_cat.public.orders",
+            "joins": [
+                {
+                    "columns": ["user_id"],
+                    "target": "cat.sch.users",
+                    "target_columns": ["id"],
+                }
+            ],
+            "columns": [{"name": "payload", "note": "JSON held as varchar"}],
+        },
+        "cat.sch.daily": {"upstream": ["cat.sch.orders"]},
+    },
+}
+
+
+def with_manifest(config: Config, path: Path, body: Any = None) -> Config:
+    """A config pointing at a manifest this test just wrote.
+
+    Real file rather than an injected object: the loader is the thing worth
+    exercising, and it is what a deployment actually runs.
+    """
+    path.write_text(json.dumps(MANIFEST if body is None else body))
+    return config.model_copy(update={"manifest_path": path})
+
+
 def texts(result: CallToolResult) -> list[str]:
     """The text payloads of a tool result, in order."""
     return [block.text for block in result.content if block.type == "text"]

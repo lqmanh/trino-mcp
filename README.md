@@ -14,6 +14,47 @@ An MCP server for querying [Trino](https://trino.io) from an AI agent harness.
 | `profile_table`  | Report a table's size, partitioning, freshness, and comment   |
 | `execute_query`  | Run a SQL query, returning rows or writing them to a file     |
 | `explain_query`  | Show how Trino would execute a query, without running it      |
+| `explain_table`  | A table's grain, join keys, and provenance — needs a manifest |
+
+## The manifest
+
+Trino reports what a table is — columns, types, size, partitioning, freshness. It cannot
+say what makes a row unique, which columns join two tables, or where a value came from; on
+Iceberg those facts do not exist to query. Point `TRINO_MANIFEST_PATH` at a JSON file
+carrying them and `explain_table` appears.
+
+[`schemas/manifest.v1.json`](schemas/manifest.v1.json) is the format, field by field. Any
+pipeline emitting that shape is a valid producer; an unrecognized `version` is refused at
+startup.
+
+```json
+{
+  "version": 1,
+  "generated_at": "2026-08-05T08:22:48+00:00",
+  "tables": {
+    "iceberg.sales.orders": {
+      "grain": ["orderkey"],
+      "replica_of": "pgsource.public.orders",
+      "joins": [
+        {
+          "columns": ["custkey"],
+          "target": "iceberg.sales.customer",
+          "target_columns": ["custkey"]
+        }
+      ]
+    },
+    "delta.sales.shipments": {
+      "columns": [
+        { "name": "extendedprice", "sources": ["tpch.tiny.lineitem.extendedprice"] }
+      ]
+    }
+  }
+}
+```
+
+Re-read when it changes, so regenerating one needs no restart.
+[`tests/e2e/manifest.json`](tests/e2e/manifest.json) is a working example over the seeded
+tables.
 
 ## Configuration
 
@@ -32,6 +73,7 @@ All settings come from the environment and are validated at startup.
 | `TRINO_QUERY_TIMEOUT_MINUTES` | `5`             | `0` disables the timeout        |
 | `TRINO_ALLOW_WRITES`          | `false`         |                                 |
 | `TRINO_OUTPUT_DIR`            | `.output`       | exports land here; auto-created |
+| `TRINO_MANIFEST_PATH`         | —               | enables `explain_table`         |
 
 A password requires `https`; pairing it with `TRINO_HTTP_SCHEME=http` is refused at
 startup rather than sent in cleartext.
@@ -118,6 +160,7 @@ In `opencode.json`:
 uv sync
 uv run pytest
 uv run ruff check && uv run ruff format --check && uv run ty check
+uv run scripts/schema.py   # regenerate schemas/
 ```
 
 `compose.yml` brings up a throwaway Trino — Iceberg over MinIO, a Postgres source, and

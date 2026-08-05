@@ -202,6 +202,9 @@ class TrinoClient:
             # Lands in system.runtime.queries.source, so queries from this server
             # are attributable without stamping a comment onto every statement.
             source="trino-mcp",
+            # The default session timezone is the host's local zone, which
+            # renders timestamps beside SHOW STATS' UTC in one response.
+            timezone="UTC",
         )
 
     def _cursor(self) -> Cursor:

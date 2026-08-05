@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "generated_at": "2026-08-05T00:00:00+00:00",
+  "tables": {
+    "iceberg.sales.orders": {
+      "grain": ["orderkey"],
+      "joins": [
+        {
+          "columns": ["custkey"],
+          "target": "iceberg.sales.customer",
+          "target_columns": ["custkey"]
+        }
+      ]
+    },
+    "iceberg.sales.customer": {
+      "grain": ["custkey"],
+      "unique_keys": [["phone"]]
+    },
+    "delta.sales.shipments": {
+      "joins": [
+        {
+          "columns": ["orderkey"],
+          "target": "iceberg.sales.orders",
+          "target_columns": ["orderkey"]
+        }
+      ],
+      "columns": [
+        {
+          "name": "extendedprice",
+          "sources": ["tpch.tiny.lineitem.extendedprice"]
+        }
+      ]
+    }
+  }
+}

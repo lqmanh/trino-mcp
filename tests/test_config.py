@@ -17,6 +17,7 @@ ALL_VARS = [
     "TRINO_QUERY_TIMEOUT_MINUTES",
     "TRINO_ALLOW_WRITES",
     "TRINO_OUTPUT_DIR",
+    "TRINO_MANIFEST_PATH",
 ]
 
 
@@ -74,6 +75,25 @@ def test_a_missing_output_dir_is_allowed_but_a_file_is_not(
 
     with pytest.raises(ValidationError, match="not a directory"):
         Config.from_env()
+
+
+def test_a_manifest_path_must_already_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unlike the output directory, nothing creates this one later.
+
+    Pointing at a file that is not there would otherwise start a server whose
+    `explain_table` knows nothing about any table, which reads as coverage.
+    """
+    monkeypatch.setenv("TRINO_MANIFEST_PATH", str(tmp_path / "absent.json"))
+
+    with pytest.raises(ValidationError, match="not a file"):
+        Config.from_env()
+
+    present = tmp_path / "manifest.json"
+    present.write_text("{}")
+    monkeypatch.setenv("TRINO_MANIFEST_PATH", str(present))
+    assert Config.from_env().manifest_path == present
 
 
 def test_the_password_does_not_survive_rendering_the_config(

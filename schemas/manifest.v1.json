@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/lqmanh/trino-mcp/main/schemas/manifest.v1.json",
+  "$defs": {
+    "Column": {
+      "description": "A column carrying something its name and Trino type do not convey.",
+      "properties": {
+        "name": {
+          "description": "Column name.",
+          "title": "Name",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the type hides, e.g. a varchar that holds JSON.",
+          "title": "Note"
+        },
+        "sources": {
+          "default": [],
+          "description": "Upstream columns it derives from, as table.column.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Sources",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Column",
+      "type": "object"
+    },
+    "Join": {
+      "description": "How this table joins to another. Not a foreign key: nothing enforces it.",
+      "properties": {
+        "columns": {
+          "description": "Columns on this table, in key order.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "target": {
+          "description": "Fully qualified catalog.schema.table.",
+          "title": "Target",
+          "type": "string"
+        },
+        "target_columns": {
+          "description": "Columns on the target, positionally matched.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Columns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "columns",
+        "target",
+        "target_columns"
+      ],
+      "title": "Join",
+      "type": "object"
+    },
+    "Table": {
+      "description": "What is known about one table beyond what the cluster reports.",
+      "properties": {
+        "grain": {
+          "default": [],
+          "description": "Columns that together identify one row. Empty when unknown.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Grain",
+          "type": "array"
+        },
+        "unique_keys": {
+          "default": [],
+          "description": "Other column sets known to be unique, besides the grain.",
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Unique Keys",
+          "type": "array"
+        },
+        "replica_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source relation this table copies, if it is a replica.",
+          "title": "Replica Of"
+        },
+        "upstream": {
+          "default": [],
+          "description": "Tables this one is derived from, if it is computed.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Upstream",
+          "type": "array"
+        },
+        "joins": {
+          "default": [],
+          "description": "Known join paths to other tables.",
+          "items": {
+            "$ref": "#/$defs/Join"
+          },
+          "title": "Joins",
+          "type": "array"
+        },
+        "columns": {
+          "default": [],
+          "description": "Only columns with a note or known sources; not the full list.",
+          "items": {
+            "$ref": "#/$defs/Column"
+          },
+          "title": "Columns",
+          "type": "array"
+        }
+      },
+      "title": "Table",
+      "type": "object"
+    }
+  },
+  "description": "A set of table facts, generated at a point in time.",
+  "properties": {
+    "version": {
+      "description": "Format version. Bumped only when a field changes meaning.",
+      "title": "Version",
+      "type": "integer"
+    },
+    "generated_at": {
+      "description": "ISO 8601 time the manifest was produced.",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "tables": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Table"
+      },
+      "description": "Keyed by fully qualified catalog.schema.table.",
+      "title": "Tables",
+      "type": "object"
+    }
+  },
+  "required": [
+    "version",
+    "generated_at",
+    "tables"
+  ],
+  "title": "Manifest",
+  "type": "object"
+}

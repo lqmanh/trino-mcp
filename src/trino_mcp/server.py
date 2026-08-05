@@ -13,6 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, ValidationError
 
+from . import manifest as mf
 from .client import Profile, QueryRejected, QueryResult, QueryTimeout, TrinoClient
 from .config import Config
 from .export import OutputFormat
@@ -205,6 +206,103 @@ class TableProfile(BaseModel):
     ]
 
 
+class TableJoin(BaseModel):
+    columns: Annotated[
+        list[str], Field(description="Columns on this table, in key order.")
+    ]
+    target: QualifiedTable
+    target_columns: Annotated[
+        list[str], Field(description="Columns on the target, matched by position.")
+    ]
+
+
+class ColumnOrigin(BaseModel):
+    name: Annotated[str, Field(description="Column name.")]
+    note: Annotated[
+        str,
+        Field(
+            description=(
+                "What the Trino type does not convey, e.g. a varchar holding "
+                "JSON. Empty when there is nothing to add."
+            )
+        ),
+    ]
+    sources: Annotated[
+        list[str],
+        Field(description="Upstream columns this one derives from, as table.column."),
+    ]
+
+
+class TableFacts(BaseModel):
+    table: QualifiedTable
+    known: Annotated[
+        bool,
+        Field(
+            description=(
+                "False when the manifest has no entry for this table. That is a "
+                "gap in coverage, not a statement that the table has no grain."
+            )
+        ),
+    ]
+    generated_at: Annotated[
+        str,
+        Field(
+            description=(
+                "When the manifest was produced. These facts are static and can "
+                "lag the cluster; Trino stays the authority on columns and types."
+            )
+        ),
+    ]
+    grain: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Columns that together identify one row — what to GROUP BY to "
+                "avoid double counting. Empty means unknown, not that rows are unique."
+            )
+        ),
+    ]
+    unique_keys: Annotated[
+        list[list[str]],
+        Field(description="Other column sets known to be unique, besides the grain."),
+    ]
+    replica_of: Annotated[
+        str | None,
+        Field(
+            description=(
+                "The source relation this table copies. Its presence means the "
+                "data is a replica and lags the system of record. Null otherwise."
+            )
+        ),
+    ]
+    upstream: Annotated[
+        list[str],
+        Field(description="Tables this one is computed from. Empty for a replica."),
+    ]
+    joins: Annotated[
+        list[TableJoin],
+        Field(
+            description=(
+                "Which columns join this table to another. Inherited from the "
+                "source database; nothing in the warehouse enforces them, and "
+                "the list is not exhaustive."
+            )
+        ),
+    ]
+    columns: Annotated[
+        list[ColumnOrigin],
+        Field(
+            description=(
+                "Only columns with something to add; call `describe_table` for "
+                "the full list."
+            )
+        ),
+    ]
+    note: Annotated[
+        str, Field(description="Why an answer is missing, when it is. Empty otherwise.")
+    ]
+
+
 class Plan(BaseModel):
     plan: Annotated[str, Field(description="The query plan as reported by Trino.")]
 
@@ -214,7 +312,7 @@ class FileWritten(BaseModel):
     rows_written: Annotated[int, Field(description="Number of data rows written.")]
 
 
-def _instructions(config: Config) -> str:
+def _instructions(config: Config, tables: int | None = None) -> str:
     cap = "uncapped" if config.max_rows <= 0 else f"{config.max_rows} rows"
     timeout = (
         "no timeout"
@@ -222,6 +320,16 @@ def _instructions(config: Config) -> str:
         else f"{config.query_timeout_minutes:g} minutes"
     )
     writes = "enabled" if config.allow_writes else "disabled (read-only)"
+    catalog_note = (
+        ""
+        if not tables
+        else (
+            f"\n- A manifest covering {tables} tables is loaded. Call "
+            "`explain_table` before joining or aggregating one: it gives the "
+            "grain, the join keys, and where the data came from, none of which "
+            "the cluster reports."
+        )
+    )
     return (
         "Query a Trino cluster over the Model Context Protocol.\n"
         f"- Results are capped at {cap}; a truncated result sets truncated=true, "
@@ -232,7 +340,7 @@ def _instructions(config: Config) -> str:
         "- To pull a large result set out for downstream processing, pass "
         "output_file_format to `execute_query`: the rows go straight to disk "
         "uncapped and never enter this conversation. The server picks the "
-        "filename and returns it."
+        "filename and returns it." + catalog_note
     )
 
 
@@ -257,10 +365,17 @@ def _generate_filename(fmt: OutputFormat) -> str:
 
 def create_server(client: TrinoClient, config: Config) -> MCPServer:
     """Build the MCP server around an already-constructed client."""
+    store = mf.Store(config.manifest_path) if config.manifest_path else None
+    if store is not None and not len(store):
+        log.warning(
+            "manifest %s covers no tables; explain_table not registered", store.path
+        )
+        store = None
+
     server = MCPServer(
         name="trino-mcp",
         version=__version__,
-        instructions=_instructions(config),
+        instructions=_instructions(config, len(store) if store else None),
     )
 
     async def call[T](func: Callable[..., T], *args: Any) -> T:
@@ -480,6 +595,71 @@ def create_server(client: TrinoClient, config: Config) -> MCPServer:
             type="text",
             text=json.dumps(payload, default=str, separators=(",", ":")),
         )
+
+    # Registered only when a manifest is configured and not empty
+    if store:
+
+        @server.tool()
+        async def explain_table(
+            table: TableName, catalog: CatalogPart = "", schema: SchemaPart = ""
+        ) -> TableFacts:
+            """Explain a table: its grain, how it joins, and where it came from.
+
+            Call this before writing a join or an aggregate. `grain` is the
+            column set that makes one row, `joins` gives the columns to join on,
+            and `replica_of`, `upstream` and `columns[].sources` answer where a
+            value originally came from. Column names alone will not tell you any
+            of it, and neither will the cluster.
+
+            Static generated metadata, so it can lag; `describe_table` and
+            `profile_table` remain the live truth.
+            """
+            cat, sch, tbl = resolve_target(table, catalog, schema)
+            name = f"{cat}.{sch}.{tbl}"
+            facts, loaded = await call(store.lookup, name)
+            if facts is None:
+                return TableFacts(
+                    table=name,
+                    known=False,
+                    generated_at=loaded.generated_at,
+                    grain=[],
+                    unique_keys=[],
+                    replica_of=None,
+                    upstream=[],
+                    joins=[],
+                    columns=[],
+                    note=(
+                        f"No entry for {name}. The manifest covers "
+                        f"{len(loaded.tables)} other tables, so this is missing "
+                        "coverage rather than a table without a grain."
+                    ),
+                )
+            return TableFacts(
+                table=name,
+                known=True,
+                generated_at=loaded.generated_at,
+                grain=facts.grain,
+                unique_keys=facts.unique_keys,
+                replica_of=facts.replica_of,
+                upstream=facts.upstream,
+                joins=[
+                    TableJoin(
+                        columns=join.columns,
+                        target=join.target,
+                        target_columns=join.target_columns,
+                    )
+                    for join in facts.joins
+                ],
+                columns=[
+                    ColumnOrigin(
+                        name=column.name,
+                        note=column.note or "",
+                        sources=column.sources,
+                    )
+                    for column in facts.columns
+                ],
+                note="",
+            )
 
     @server.tool()
     async def explain_query(
