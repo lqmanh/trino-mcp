@@ -26,7 +26,6 @@ class Config(BaseModel):
     query_timeout_minutes: float = Field(default=5.0, ge=0)
     allow_writes: bool = False
     output_dir: Path = Field(default=Path(".output"), validate_default=True)
-    manifest_path: Path | None = None
 
     @field_validator("output_dir")
     @classmethod
@@ -34,16 +33,6 @@ class Config(BaseModel):
         resolved = value.expanduser().resolve()
         if resolved.exists() and not resolved.is_dir():
             raise ValueError(f"TRINO_OUTPUT_DIR is not a directory: {resolved}")
-        return resolved
-
-    @field_validator("manifest_path")
-    @classmethod
-    def _refuse_missing_manifest(cls, value: Path | None) -> Path | None:
-        if value is None:
-            return None
-        resolved = value.expanduser().resolve()
-        if not resolved.is_file():
-            raise ValueError(f"TRINO_MANIFEST_PATH is not a file: {resolved}")
         return resolved
 
     @model_validator(mode="after")
@@ -80,7 +69,6 @@ class Config(BaseModel):
             "query_timeout_minutes": os.environ.get("TRINO_QUERY_TIMEOUT_MINUTES"),
             "allow_writes": os.environ.get("TRINO_ALLOW_WRITES"),
             "output_dir": os.environ.get("TRINO_OUTPUT_DIR"),
-            "manifest_path": os.environ.get("TRINO_MANIFEST_PATH"),
         }
         values = {key: value for key, value in env.items() if value}
 

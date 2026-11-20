@@ -9,7 +9,6 @@ uv run pytest tests/test_client.py -k truncation   # one file / one pattern
 uv run pytest "tests/test_sql.py::test_reads_are_allowed[SHOW CATALOGS]"
 uv run pytest -m e2e                               # against a real Trino; needs docker
 uv run ruff check && uv run ruff format --check && uv run ty check
-uv run scripts/schema.py                           # regenerate schemas/; test_manifest enforces it
 npx prettier --write .
 ```
 
@@ -30,28 +29,22 @@ tool name errors identically. Assert on the tool list or on specific error text.
 
 ## Architecture
 
-Six modules, layered bottom-up, each importing only from those below it:
+Five modules, layered bottom-up, each importing only from those below it:
 
-| Module        | Role                                                            |
-| ------------- | --------------------------------------------------------------- |
-| `config.py`   | Frozen pydantic `Config`, built once by `from_env()` at startup |
-| `sql.py`      | sqlglot: the read-only guard, plus reading DDL                  |
-| `export.py`   | Rows to csv/json/parquet on disk; owns `OutputFormat`           |
-| `manifest.py` | The static table facts Trino cannot report; owns their schema   |
-| `client.py`   | Blocking Trino access: caps, deadlines, cancellation            |
-| `server.py`   | MCP tool definitions, `create_server()`, `main()`               |
+| Module      | Role                                                            |
+| ----------- | --------------------------------------------------------------- |
+| `config.py` | Frozen pydantic `Config`, built once by `from_env()` at startup |
+| `sql.py`    | sqlglot: the read-only guard, plus reading DDL                  |
+| `export.py` | Rows to csv/json/parquet on disk; owns `OutputFormat`           |
+| `client.py` | Blocking Trino access: caps, deadlines, cancellation            |
+| `server.py` | MCP tool definitions, `create_server()`, `main()`               |
 
-`export.py` and `manifest.py` import nothing from this package.
+`export.py` imports nothing from this package.
 
 `export.py` owns Trino _type_ semantics — the sqlglot dialect, and the Python shape each
 type arrives in — while `client.py` owns _cursor_ semantics. Its `Batches` protocol asks
 only for `fetchmany`, keeping `description` and its py.typed inaccuracies on the client
 side.
-
-`manifest.py` must not learn what generates a manifest: it defines the format, a pipeline
-elsewhere emits it. `schemas/manifest.v1.json` publishes that format for producer authors
-and is generated from the pydantic models by `scripts/schema.py` — regenerate it in the
-same commit as any change to them, which `test_manifest.py` enforces.
 
 `__init__.py` is a facade. `__version__` lives in `server.py` and is re-exported, not the
 reverse — the package root importing a submodule that imports back is the cycle this
@@ -83,19 +76,6 @@ fixture.
 
 ### Decisions that look wrong until you know why
 
-- **`explain_table` is separate from `describe_table`, and only exists with a manifest.**
-  Folding it in would solve discovery for free — the real argument for it. Against:
-  `describe_table` reports live cluster truth, and mixing generated data in leaves the
-  model unable to tell which half is verified. Conditional registration is the other half:
-  a tool's description ships in every session's prompt whether or not it is called, so a
-  deployment without a manifest pays nothing.
-- **A manifest with an unknown `version` is refused, not partially read.** Every field is
-  optional, so a future format whose meanings have shifted validates cleanly and then
-  answers confidently and wrongly.
-- **An empty manifest is dropped with a warning, not refused.** A server that might answer
-  _wrongly_ must not start; one with nothing to say reports the gap. Refusing would also
-  take the other tools down over an optional one. The warning is the whole mitigation —
-  without it the tool silently ceases to exist for whoever configured a manifest.
 - **Retry ignores `TRINO_ALLOW_WRITES`.** A statement is re-run after a transport failure
   only when `is_read_only()` says repeating it is harmless, whatever the flag says: it
   lives in harness config and can change without anyone revisiting this code.
